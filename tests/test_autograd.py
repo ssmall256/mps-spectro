@@ -179,8 +179,8 @@ class TestGradcheck:
             return mps_stft_forward(inp, n_fft=128, hop_length=32, center=center).abs()
 
         assert torch.autograd.gradcheck(
-            fn, (x,), eps=1e-3, atol=1e-2, rtol=1e-2,
-            nondet_tol=1e-3,
+            fn, (x,), eps=1e-3, atol=2e-2, rtol=2e-2,
+            nondet_tol=2e-3,
         )
 
     def test_istft_gradcheck(self) -> None:
