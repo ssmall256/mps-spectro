@@ -98,9 +98,9 @@ def _print_table(
         f"| {'torch MPS (ms)':>15} "
         f"| {'mps_spectro (ms)':>17} "
         f"| {'vs torch MPS':>13} "
-        f"| {'vs CPU':>8} |"
+        f"| {'vs CPU':>7} |"
     )
-    print(f"|{'-'*30}|{'-'*12}|{'-'*17}|{'-'*19}|{'-'*15}|{'-'*10}|")
+    print(f"|{'-'*30}|{'-'*12}|{'-'*17}|{'-'*19}|{'-'*15}|{'-'*9}|")
     for label, t_cpu, t_torch_mps, t_mps in rows:
         vs_torch = t_torch_mps / max(t_mps, 1e-6)
         vs_cpu = t_cpu / max(t_mps, 1e-6)
@@ -109,8 +109,8 @@ def _print_table(
             f"| {t_cpu:>8.3f}ms "
             f"| {t_torch_mps:>13.3f}ms "
             f"| {t_mps:>15.3f}ms "
-            f"| **{vs_torch:.2f}x** "
-            f"| **{vs_cpu:.1f}x** |"
+            f"| {vs_torch:>11.2f}x  "
+            f"| {vs_cpu:>5.1f}x  |"
         )
 
 # ---------------------------------------------------------------------------
