@@ -425,6 +425,7 @@ kernel void stft_backward_input_float(
     const int first_f_direct = max(0, (t_padded - n_fft + 1 + hop_length - 1) / hop_length);
     const int last_f_direct = min(n_frames - 1, t_padded / hop_length);
 
+#pragma unroll 4
     for (int f = first_f_direct; f <= last_f_direct; ++f) {
         const int j = t_padded - f * hop_length;
         if (j >= 0 && j < n_fft) {
@@ -443,6 +444,7 @@ kernel void stft_backward_input_float(
         const int refl_padded = pad - t;
         const int first_f = max(0, (refl_padded - n_fft + 1 + hop_length - 1) / hop_length);
         const int last_f = min(n_frames - 1, refl_padded / hop_length);
+#pragma unroll 4
         for (int f = first_f; f <= last_f; ++f) {
             const int j = refl_padded - f * hop_length;
             if (j >= 0 && j < n_fft) {
@@ -463,6 +465,7 @@ kernel void stft_backward_input_float(
         if (refl_padded >= 0) {
             const int first_f = max(0, (refl_padded - n_fft + 1 + hop_length - 1) / hop_length);
             const int last_f = min(n_frames - 1, refl_padded / hop_length);
+#pragma unroll 4
             for (int f = first_f; f <= last_f; ++f) {
                 const int j = refl_padded - f * hop_length;
                 if (j >= 0 && j < n_fft) {
@@ -522,7 +525,8 @@ kernel void istft_backward_frames_float(
         }
 
         if (ws > 1.0e-11f) {
-            grad = grad_output[b * output_length + t] * window[j] / ws;
+            const float inv_ws = 1.0f / ws;
+            grad = grad_output[b * output_length + t] * window[j] * inv_ws;
         }
     }
 
