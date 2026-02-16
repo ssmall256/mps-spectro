@@ -588,6 +588,170 @@ torch::Tensor mps_stft_extract_frames(
   return output;
 }
 
+// ---------------------------------------------------------------------------
+// Backward kernels
+// ---------------------------------------------------------------------------
+
+id<MTLComputePipelineState> get_stft_backward_input_pso() {
+  static std::once_flag pso_once;
+  static id<MTLComputePipelineState> pso = nil;
+  std::call_once(pso_once, []() {
+    pso = build_istft_pso("stft_backward_input_float");
+  });
+  return pso;
+}
+
+id<MTLComputePipelineState> get_istft_backward_frames_pso() {
+  static std::once_flag pso_once;
+  static id<MTLComputePipelineState> pso = nil;
+  std::call_once(pso_once, []() {
+    pso = build_istft_pso("istft_backward_frames_float");
+  });
+  return pso;
+}
+
+torch::Tensor mps_stft_backward_input(
+    const torch::Tensor& grad_frames,  // [B, n_frames, n_fft]
+    const torch::Tensor& window,       // [n_fft]
+    int64_t input_length,
+    int64_t hop_length,
+    int64_t n_fft,
+    bool center) {
+
+  TORCH_CHECK(grad_frames.device().is_mps(), "grad_frames must be an MPS tensor");
+  TORCH_CHECK(window.device().is_mps(), "window must be an MPS tensor");
+  TORCH_CHECK(grad_frames.is_contiguous(), "grad_frames must be contiguous");
+  TORCH_CHECK(window.is_contiguous(), "window must be contiguous");
+  TORCH_CHECK(grad_frames.dim() == 3, "grad_frames must be [B, n_frames, n_fft]");
+  TORCH_CHECK(grad_frames.scalar_type() == torch::kFloat, "grad_frames must be float32");
+
+  int64_t batch_size = grad_frames.size(0);
+  int64_t n_frames = grad_frames.size(1);
+  int64_t pad_amount = center ? (n_fft / 2) : 0;
+
+  torch::Tensor grad_input = torch::zeros(
+      {batch_size, input_length}, grad_frames.options());
+
+  @autoreleasepool {
+    id<MTLCommandBuffer> commandBuffer = torch::mps::get_command_buffer();
+    TORCH_CHECK(commandBuffer, "Failed to get MPS command buffer");
+    dispatch_queue_t serialQueue = torch::mps::get_dispatch_queue();
+
+    id<MTLComputePipelineState> pso = get_stft_backward_input_pso();
+
+    int b_i = static_cast<int>(batch_size);
+    int t_i = static_cast<int>(input_length);
+    int nfft_i = static_cast<int>(n_fft);
+    int hop_i = static_cast<int>(hop_length);
+    int nf_i = static_cast<int>(n_frames);
+    int pad_i = static_cast<int>(pad_amount);
+
+    const uint64_t total_threads =
+        static_cast<uint64_t>(batch_size) * static_cast<uint64_t>(input_length);
+    NSUInteger tg = pick_threadgroup_size(pso, total_threads);
+
+    dispatch_sync(serialQueue, ^(){
+      id<MTLComputeCommandEncoder> enc = [commandBuffer computeCommandEncoder];
+      TORCH_CHECK(enc, "Failed to create compute encoder");
+
+      [enc setComputePipelineState:pso];
+      [enc setBuffer:getMTLBufferStorage(grad_frames) offset:grad_frames.storage_offset() * grad_frames.element_size() atIndex:0];
+      [enc setBuffer:getMTLBufferStorage(window) offset:window.storage_offset() * window.element_size() atIndex:1];
+      [enc setBuffer:getMTLBufferStorage(grad_input) offset:grad_input.storage_offset() * grad_input.element_size() atIndex:2];
+      [enc setBytes:&b_i length:sizeof(int) atIndex:3];
+      [enc setBytes:&t_i length:sizeof(int) atIndex:4];
+      [enc setBytes:&nfft_i length:sizeof(int) atIndex:5];
+      [enc setBytes:&hop_i length:sizeof(int) atIndex:6];
+      [enc setBytes:&nf_i length:sizeof(int) atIndex:7];
+      [enc setBytes:&pad_i length:sizeof(int) atIndex:8];
+
+      MTLSize gridSize = MTLSizeMake(total_threads, 1, 1);
+      MTLSize threadgroupSize = MTLSizeMake(tg, 1, 1);
+      [enc dispatchThreads:gridSize threadsPerThreadgroup:threadgroupSize];
+      [enc endEncoding];
+
+      torch::mps::commit();
+    });
+  }
+
+  return grad_input;
+}
+
+torch::Tensor mps_istft_backward_frames(
+    const torch::Tensor& grad_output,  // [B, output_length]
+    const torch::Tensor& window,       // [W]
+    const torch::Tensor& window_sq,    // [W]
+    int64_t n_frames,
+    int64_t hop_length) {
+
+  TORCH_CHECK(grad_output.device().is_mps(), "grad_output must be an MPS tensor");
+  TORCH_CHECK(window.device().is_mps(), "window must be an MPS tensor");
+  TORCH_CHECK(window_sq.device().is_mps(), "window_sq must be an MPS tensor");
+  TORCH_CHECK(grad_output.is_contiguous(), "grad_output must be contiguous");
+  TORCH_CHECK(window.is_contiguous(), "window must be contiguous");
+  TORCH_CHECK(window_sq.is_contiguous(), "window_sq must be contiguous");
+  TORCH_CHECK(grad_output.dim() == 2, "grad_output must be [B, output_length]");
+  TORCH_CHECK(grad_output.scalar_type() == torch::kFloat, "grad_output must be float32");
+
+  int64_t batch_size = grad_output.size(0);
+  int64_t output_length = grad_output.size(1);
+  int64_t win_length = window.size(0);
+
+  torch::Tensor grad_frames = torch::empty(
+      {batch_size, win_length, n_frames}, grad_output.options());
+
+  @autoreleasepool {
+    id<MTLCommandBuffer> commandBuffer = torch::mps::get_command_buffer();
+    TORCH_CHECK(commandBuffer, "Failed to get MPS command buffer");
+    dispatch_queue_t serialQueue = torch::mps::get_dispatch_queue();
+
+    id<MTLComputePipelineState> pso = get_istft_backward_frames_pso();
+
+    int b_i = static_cast<int>(batch_size);
+    int nf_i = static_cast<int>(n_frames);
+    int w_i = static_cast<int>(win_length);
+    int hop_i = static_cast<int>(hop_length);
+    int out_i = static_cast<int>(output_length);
+
+    NSUInteger max_tg = pso.maxTotalThreadsPerThreadgroup;
+    NSUInteger tg_x = std::min(static_cast<NSUInteger>(win_length), max_tg);
+    NSUInteger w = pso.threadExecutionWidth;
+    if (w > 0 && tg_x > w) {
+      tg_x = (tg_x / w) * w;
+    }
+
+    // 3D grid: (win_length, n_frames, batch_size)
+    MTLSize gridSize = MTLSizeMake(
+        static_cast<NSUInteger>(win_length),
+        static_cast<NSUInteger>(n_frames),
+        static_cast<NSUInteger>(batch_size));
+    MTLSize threadgroupSize = MTLSizeMake(tg_x, 1, 1);
+
+    dispatch_sync(serialQueue, ^(){
+      id<MTLComputeCommandEncoder> enc = [commandBuffer computeCommandEncoder];
+      TORCH_CHECK(enc, "Failed to create compute encoder");
+
+      [enc setComputePipelineState:pso];
+      [enc setBuffer:getMTLBufferStorage(grad_output) offset:grad_output.storage_offset() * grad_output.element_size() atIndex:0];
+      [enc setBuffer:getMTLBufferStorage(window) offset:window.storage_offset() * window.element_size() atIndex:1];
+      [enc setBuffer:getMTLBufferStorage(window_sq) offset:window_sq.storage_offset() * window_sq.element_size() atIndex:2];
+      [enc setBuffer:getMTLBufferStorage(grad_frames) offset:grad_frames.storage_offset() * grad_frames.element_size() atIndex:3];
+      [enc setBytes:&b_i length:sizeof(int) atIndex:4];
+      [enc setBytes:&nf_i length:sizeof(int) atIndex:5];
+      [enc setBytes:&w_i length:sizeof(int) atIndex:6];
+      [enc setBytes:&hop_i length:sizeof(int) atIndex:7];
+      [enc setBytes:&out_i length:sizeof(int) atIndex:8];
+
+      [enc dispatchThreads:gridSize threadsPerThreadgroup:threadgroupSize];
+      [enc endEncoding];
+
+      torch::mps::commit();
+    });
+  }
+
+  return grad_frames;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("mps_istft_overlap_add_div_envelope", &mps_istft_overlap_add_div_envelope,
         "MPS ISTFT overlap-add / envelope (fused, no EPS clamp)",
@@ -604,4 +768,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("mps_stft_extract_frames", &mps_stft_extract_frames,
         "MPS STFT fused reflect-pad + windowed frame extraction",
         py::arg("input"), py::arg("window"), py::arg("hop_length"), py::arg("n_fft"), py::arg("center"));
+  m.def("mps_stft_backward_input", &mps_stft_backward_input,
+        "MPS STFT backward: grad_input from grad_frames",
+        py::arg("grad_frames"), py::arg("window"), py::arg("input_length"),
+        py::arg("hop_length"), py::arg("n_fft"), py::arg("center"));
+  m.def("mps_istft_backward_frames", &mps_istft_backward_frames,
+        "MPS ISTFT backward: grad_frames from grad_output",
+        py::arg("grad_output"), py::arg("window"), py::arg("window_sq"),
+        py::arg("n_frames"), py::arg("hop_length"));
 }

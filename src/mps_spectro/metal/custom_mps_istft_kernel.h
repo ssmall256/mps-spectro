@@ -382,4 +382,151 @@ kernel void stft_extract_frames_tiled_float(
         output[out_batch_offset + f * n_fft + j] = sample * w;
     }
 }
+
+// ---------------------------------------------------------------------------
+// STFT backward: grad_input from grad_frames
+// ---------------------------------------------------------------------------
+// Forward was: frames[b, f, j] = input[b, reflect(f*hop+j-pad)] * window[j]
+// Backward: grad_input[b, t] = Σ_{f,j: reflect(f*hop+j-pad)==t} grad_frames[b,f,j] * window[j]
+//
+// We parallelize over (b, t) — one thread per output sample — and gather
+// contributions from all (f, j) that map to t.  No atomics needed.
+//
+// Grid: 1D, total = batch_size * input_length
+
+kernel void stft_backward_input_float(
+    constant float* grad_frames [[buffer(0)]],  // [B, n_frames, n_fft]
+    constant float* window [[buffer(1)]],       // [n_fft]
+    device float* grad_input [[buffer(2)]],     // [B, T]
+    constant int& batch_size [[buffer(3)]],
+    constant int& input_length [[buffer(4)]],
+    constant int& n_fft [[buffer(5)]],
+    constant int& hop_length [[buffer(6)]],
+    constant int& n_frames [[buffer(7)]],
+    constant int& pad [[buffer(8)]],
+    uint gid [[thread_position_in_grid]]) {
+
+    const uint total = (uint)(batch_size * input_length);
+    if (gid >= total) return;
+
+    const int b = (int)(gid / (uint)input_length);
+    const int t = (int)(gid % (uint)input_length);
+
+    float acc = 0.0f;
+
+    // For each output position t in the original (unpadded) input, find
+    // all (f, j) pairs such that reflect(f*hop + j - pad) == t.
+    //
+    // Direct contributions (no reflection): f*hop + j - pad == t  →  j = t + pad - f*hop
+    // The padded-domain position is t_padded = t + pad.
+    // Frame f reads padded positions [f*hop, f*hop + n_fft).
+    // So j = t_padded - f*hop, and we need 0 <= j < n_fft.
+    const int t_padded = t + pad;
+    const int first_f_direct = max(0, (t_padded - n_fft + 1 + hop_length - 1) / hop_length);
+    const int last_f_direct = min(n_frames - 1, t_padded / hop_length);
+
+    for (int f = first_f_direct; f <= last_f_direct; ++f) {
+        const int j = t_padded - f * hop_length;
+        if (j >= 0 && j < n_fft) {
+            const int gf_idx = b * n_frames * n_fft + f * n_fft + j;
+            acc += grad_frames[gf_idx] * window[j];
+        }
+    }
+
+    // Reflected contributions from left pad: the padded position p < 0
+    // maps to reflect_index(p) = -p.  If -p == t, then p = -t.
+    // Frame f reads padded position p = f*hop + j - pad.
+    // For reflection from left: p = -t → f*hop + j = pad - t → j = pad - t - f*hop
+    if (pad > 0 && t > 0 && t <= pad) {
+        const int t_reflected = -t;  // padded position that reflects to t
+        // t_reflected + pad = -t + pad = pad - t
+        const int refl_padded = pad - t;
+        const int first_f = max(0, (refl_padded - n_fft + 1 + hop_length - 1) / hop_length);
+        const int last_f = min(n_frames - 1, refl_padded / hop_length);
+        for (int f = first_f; f <= last_f; ++f) {
+            const int j = refl_padded - f * hop_length;
+            if (j >= 0 && j < n_fft) {
+                const int gf_idx = b * n_frames * n_fft + f * n_fft + j;
+                acc += grad_frames[gf_idx] * window[j];
+            }
+        }
+    }
+
+    // Reflected contributions from right pad: padded position p >= input_length + pad
+    // maps to reflect_index(p - pad) = 2*(input_length-1) - (p - pad).
+    // If that equals t: 2*(input_length-1) - (p - pad) = t
+    //   → p = 2*(input_length-1) - t + pad
+    // The reflected padded position (relative to start) is:
+    //   p_from_start = 2*(input_length - 1) - t + pad
+    if (pad > 0 && t >= input_length - pad && t < input_length - 1) {
+        const int refl_padded = 2 * (input_length - 1) - t + pad;
+        if (refl_padded >= 0) {
+            const int first_f = max(0, (refl_padded - n_fft + 1 + hop_length - 1) / hop_length);
+            const int last_f = min(n_frames - 1, refl_padded / hop_length);
+            for (int f = first_f; f <= last_f; ++f) {
+                const int j = refl_padded - f * hop_length;
+                if (j >= 0 && j < n_fft) {
+                    const int gf_idx = b * n_frames * n_fft + f * n_fft + j;
+                    acc += grad_frames[gf_idx] * window[j];
+                }
+            }
+        }
+    }
+
+    grad_input[gid] = acc;
+}
+
+// ---------------------------------------------------------------------------
+// ISTFT backward: grad_frames from grad_output
+// ---------------------------------------------------------------------------
+// Forward was: y[b,t] = (Σ_f frames[b,j,f] * window[j]) / wsum[t]
+//   where j = t - f*hop
+// Backward: grad_frames[b,j,f] = grad_output[b, f*hop+j] * window[j] / wsum[f*hop+j]
+//
+// Parallelize over (b, j, f) — one thread per frame element, pure gather.
+// Grid: 3D, (n_fft, n_frames, batch_size)
+
+kernel void istft_backward_frames_float(
+    constant float* grad_output [[buffer(0)]],  // [B, output_length]
+    constant float* window [[buffer(1)]],       // [W]
+    constant float* window_sq [[buffer(2)]],    // [W]
+    device float* grad_frames [[buffer(3)]],    // [B, W, N]
+    constant int& batch_size [[buffer(4)]],
+    constant int& n_frames [[buffer(5)]],
+    constant int& win_length [[buffer(6)]],
+    constant int& hop_length [[buffer(7)]],
+    constant int& output_length [[buffer(8)]],
+    uint3 tid [[thread_position_in_grid]]) {
+
+    const int j = (int)tid.x;   // within-window sample
+    const int f = (int)tid.y;   // frame index
+    const int b = (int)tid.z;   // batch
+
+    if (j >= win_length || f >= n_frames || b >= batch_size) return;
+
+    const int t = f * hop_length + j;
+
+    float grad = 0.0f;
+    if (t < output_length) {
+        // Compute wsum inline (same pattern as forward kernel).
+        // wsum[t] = Σ_g window_sq[t - g*hop] for all valid g.
+        const int first_g = max(0, (t - (win_length - 1) + hop_length - 1) / hop_length);
+        const int last_g = min(n_frames - 1, t / hop_length);
+        float ws = 0.0f;
+#pragma unroll 4
+        for (int g = first_g; g <= last_g; ++g) {
+            const int k = t - g * hop_length;
+            if (k >= 0 && k < win_length) {
+                ws += window_sq[k];
+            }
+        }
+
+        if (ws > 1.0e-11f) {
+            grad = grad_output[b * output_length + t] * window[j] / ws;
+        }
+    }
+
+    // Native layout: [B, W, N]
+    grad_frames[b * win_length * n_frames + j * n_frames + f] = grad;
+}
 )MPS_ISTFT";

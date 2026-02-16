@@ -64,6 +64,23 @@ y = istft(spec, n_fft=1024, hop_length=256, center=True)
 - `kernel_dtype="float32"|"float16"|"mixed"` -- Metal kernel precision
 - `kernel_layout="auto"|"native"|"transposed"` -- memory layout selection
 
+### Autograd
+
+Both `stft` and `istft` support PyTorch autograd when inputs have `requires_grad=True`:
+
+```python
+x = torch.randn(4, 16000, device="mps", requires_grad=True)
+
+spec = stft(x, n_fft=1024, hop_length=256)
+y = istft(spec, n_fft=1024, hop_length=256, center=True, length=16000)
+
+loss = y.pow(2).sum()
+loss.backward()
+print(x.grad.shape)  # torch.Size([4, 16000])
+```
+
+When `requires_grad=False` (the default), zero overhead — the original Metal kernel path is used directly. Backward passes use custom Metal kernels for GPU-accelerated gradient computation (~1.4–1.9× faster than `torch.istft` backward). Window gradients are not computed (returns `None`) since windows are almost always frozen in practice.
+
 ## How it works
 
 1. **STFT**: a tiled Metal kernel loads overlapping signal chunks into threadgroup shared memory (~3× data reuse for typical n_fft/hop ratios), applies reflect-padding and windowing in one pass, then `torch.fft.rfft` for the FFT

@@ -366,6 +366,41 @@ def mps_istft_forward(
         torch_like=bool(torch_like),
     )
 
+    # Autograd path: force float32 native layout and wrap the Metal kernel
+    # so that gradients flow through the overlap-add + envelope division.
+    if time_frames.requires_grad:
+        from mps_spectro.autograd import ISTFTOverlapAdd
+
+        frames_for_kernel = time_frames.contiguous()
+        y = ISTFTOverlapAdd.apply(
+            frames_for_kernel,
+            window,
+            window_sq,
+            int(hop_length),
+            int(full_length),
+        )
+
+        if center:
+            pad = n_fft // 2
+            if length is None:
+                y = y[:, pad:-pad] if y.size(-1) > 2 * pad else y[:, :0]
+            else:
+                start = pad
+                target = int(length)
+                end = min(y.size(-1), start + target)
+                y = y[:, start:end]
+                if y.size(-1) < target:
+                    y = torch.nn.functional.pad(y, (0, target - y.size(-1)))
+        elif length is not None:
+            if y.size(-1) >= int(length):
+                y = y[:, : int(length)]
+            else:
+                y = torch.nn.functional.pad(y, (0, int(length) - y.size(-1)))
+
+        if orig_2d_input:
+            y = y.squeeze(0)
+        return y
+
     layout_key = (
         int(frames_for_kernel.size(0)),
         int(frames_for_kernel.size(1)),

@@ -112,9 +112,15 @@ def mps_stft_forward(
     else:
         # Fused Metal kernel: reflect-pad + strided frame extraction + windowing
         # in a single GPU pass (no intermediate padded or strided tensors).
-        frames = compiled_lib.mps_stft_extract_frames(
-            x, window_nfft, int(hop_length), int(n_fft), bool(center)
-        )
+        if x.requires_grad:
+            from mps_spectro.autograd import STFTExtractFrames
+            frames = STFTExtractFrames.apply(
+                x, window_nfft, int(hop_length), int(n_fft), bool(center),
+            )
+        else:
+            frames = compiled_lib.mps_stft_extract_frames(
+                x, window_nfft, int(hop_length), int(n_fft), bool(center)
+            )
 
         if onesided:
             spec = torch.fft.rfft(frames, n=n_fft, dim=-1, norm="backward")
