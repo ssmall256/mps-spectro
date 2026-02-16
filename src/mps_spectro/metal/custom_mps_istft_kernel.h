@@ -35,11 +35,10 @@ kernel void istft_overlap_add_div_envelope_float(
 #pragma unroll 4
     for (int f = first_frame; f <= last_frame; ++f) {
         const int j = t - f * hop_length;
-        if (j >= 0 && j < frame) {
-            const int frame_idx = batch_frames_base + j * n_frames + f;
-            acc += frames[frame_idx] * window[j];
-            wsum += window_sq[j];
-        }
+        // Bounds on j guaranteed by first_frame/last_frame derivation.
+        const int frame_idx = batch_frames_base + j * n_frames + f;
+        acc += frames[frame_idx] * window[j];
+        wsum += window_sq[j];
     }
 
     // Torch-style masked normalization (no epsilon clamp).
@@ -78,11 +77,9 @@ kernel void istft_overlap_add_div_envelope_half(
 #pragma unroll 4
     for (int f = first_frame; f <= last_frame; ++f) {
         const int j = t - f * hop_length;
-        if (j >= 0 && j < frame) {
-            const int frame_idx = batch_frames_base + j * n_frames + f;
-            acc += frames[frame_idx] * window[j];
-            wsum += window_sq[j];
-        }
+        const int frame_idx = batch_frames_base + j * n_frames + f;
+        acc += frames[frame_idx] * window[j];
+        wsum += window_sq[j];
     }
 
     output[(int)gid] = (float(wsum) > 1.0e-11f) ? (acc / wsum) : half(0.0h);
@@ -119,11 +116,9 @@ kernel void istft_overlap_add_div_envelope_mixed(
 #pragma unroll 4
     for (int f = first_frame; f <= last_frame; ++f) {
         const int j = t - f * hop_length;
-        if (j >= 0 && j < frame) {
-            const int frame_idx = batch_frames_base + j * n_frames + f;
-            acc += float(frames[frame_idx]) * window[j];
-            wsum += window_sq[j];
-        }
+        const int frame_idx = batch_frames_base + j * n_frames + f;
+        acc += float(frames[frame_idx]) * window[j];
+        wsum += window_sq[j];
     }
 
     output[(int)gid] = (wsum > 1.0e-11f) ? (acc / wsum) : 0.0f;
@@ -160,11 +155,9 @@ kernel void istft_overlap_add_div_envelope_float_t(
 #pragma unroll 4
     for (int f = first_frame; f <= last_frame; ++f) {
         const int j = t - f * hop_length;
-        if (j >= 0 && j < frame) {
-            const int frame_idx = batch_frames_base + f * frame + j;
-            acc += frames[frame_idx] * window[j];
-            wsum += window_sq[j];
-        }
+        const int frame_idx = batch_frames_base + f * frame + j;
+        acc += frames[frame_idx] * window[j];
+        wsum += window_sq[j];
     }
 
     output[(int)gid] = (wsum > 1.0e-11f) ? (acc / wsum) : 0.0f;
@@ -201,11 +194,9 @@ kernel void istft_overlap_add_div_envelope_half_t(
 #pragma unroll 4
     for (int f = first_frame; f <= last_frame; ++f) {
         const int j = t - f * hop_length;
-        if (j >= 0 && j < frame) {
-            const int frame_idx = batch_frames_base + f * frame + j;
-            acc += frames[frame_idx] * window[j];
-            wsum += window_sq[j];
-        }
+        const int frame_idx = batch_frames_base + f * frame + j;
+        acc += frames[frame_idx] * window[j];
+        wsum += window_sq[j];
     }
 
     output[(int)gid] = (float(wsum) > 1.0e-11f) ? (acc / wsum) : half(0.0h);
@@ -242,11 +233,9 @@ kernel void istft_overlap_add_div_envelope_mixed_t(
 #pragma unroll 4
     for (int f = first_frame; f <= last_frame; ++f) {
         const int j = t - f * hop_length;
-        if (j >= 0 && j < frame) {
-            const int frame_idx = batch_frames_base + f * frame + j;
-            acc += float(frames[frame_idx]) * window[j];
-            wsum += window_sq[j];
-        }
+        const int frame_idx = batch_frames_base + f * frame + j;
+        acc += float(frames[frame_idx]) * window[j];
+        wsum += window_sq[j];
     }
 
     output[(int)gid] = (wsum > 1.0e-11f) ? (acc / wsum) : 0.0f;
@@ -358,13 +347,26 @@ kernel void stft_extract_frames_tiled_float(
     const int actual_span = (f_count - 1) * hop_length + n_fft;
 
     // Cooperatively load input span into shared memory.
+    // Fast path: skip reflection logic when tile is fully inside the signal.
     const int batch_offset = b * input_length;
-    for (int i = (int)lid; i < actual_span; i += (int)tg_size) {
-        int src = span_start_padded + i - pad;
-        if (src < 0 || src >= input_length) {
-            src = reflect_index(src, input_length);
+    const int span_first_raw = span_start_padded - pad;
+    const int span_last_raw = span_start_padded + actual_span - 1 - pad;
+    const bool interior = (span_first_raw >= 0) && (span_last_raw < input_length);
+
+    if (interior) {
+        // Interior tile: all indices in [0, input_length), no reflection needed.
+        for (int i = (int)lid; i < actual_span; i += (int)tg_size) {
+            shared_input[i] = input[batch_offset + span_first_raw + i];
         }
-        shared_input[i] = input[batch_offset + src];
+    } else {
+        // Boundary tile: check and reflect out-of-bounds indices.
+        for (int i = (int)lid; i < actual_span; i += (int)tg_size) {
+            int src = span_start_padded + i - pad;
+            if (src < 0 || src >= input_length) {
+                src = reflect_index(src, input_length);
+            }
+            shared_input[i] = input[batch_offset + src];
+        }
     }
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -428,10 +430,8 @@ kernel void stft_backward_input_float(
 #pragma unroll 4
     for (int f = first_f_direct; f <= last_f_direct; ++f) {
         const int j = t_padded - f * hop_length;
-        if (j >= 0 && j < n_fft) {
-            const int gf_idx = b * n_frames * n_fft + f * n_fft + j;
-            acc += grad_frames[gf_idx] * window[j];
-        }
+        const int gf_idx = b * n_frames * n_fft + f * n_fft + j;
+        acc += grad_frames[gf_idx] * window[j];
     }
 
     // Reflected contributions from left pad: the padded position p < 0
@@ -447,10 +447,8 @@ kernel void stft_backward_input_float(
 #pragma unroll 4
         for (int f = first_f; f <= last_f; ++f) {
             const int j = refl_padded - f * hop_length;
-            if (j >= 0 && j < n_fft) {
-                const int gf_idx = b * n_frames * n_fft + f * n_fft + j;
-                acc += grad_frames[gf_idx] * window[j];
-            }
+            const int gf_idx = b * n_frames * n_fft + f * n_fft + j;
+            acc += grad_frames[gf_idx] * window[j];
         }
     }
 
@@ -468,10 +466,8 @@ kernel void stft_backward_input_float(
 #pragma unroll 4
             for (int f = first_f; f <= last_f; ++f) {
                 const int j = refl_padded - f * hop_length;
-                if (j >= 0 && j < n_fft) {
-                    const int gf_idx = b * n_frames * n_fft + f * n_fft + j;
-                    acc += grad_frames[gf_idx] * window[j];
-                }
+                const int gf_idx = b * n_frames * n_fft + f * n_fft + j;
+                acc += grad_frames[gf_idx] * window[j];
             }
         }
     }
@@ -487,7 +483,7 @@ kernel void stft_backward_input_float(
 // Backward: grad_frames[b,j,f] = grad_output[b, f*hop+j] * window[j] / wsum[f*hop+j]
 //
 // Parallelize over (b, j, f) — one thread per frame element, pure gather.
-// Grid: 3D, (n_fft, n_frames, batch_size)
+// Grid: 3D, (win_length, n_frames, batch_size)
 
 kernel void istft_backward_frames_float(
     constant float* grad_output [[buffer(0)]],  // [B, output_length]
@@ -518,10 +514,9 @@ kernel void istft_backward_frames_float(
         float ws = 0.0f;
 #pragma unroll 4
         for (int g = first_g; g <= last_g; ++g) {
+            // Bounds on k guaranteed by first_g/last_g derivation.
             const int k = t - g * hop_length;
-            if (k >= 0 && k < win_length) {
-                ws += window_sq[k];
-            }
+            ws += window_sq[k];
         }
 
         if (ws > 1.0e-11f) {

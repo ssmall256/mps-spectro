@@ -10,7 +10,7 @@
 
 #include "custom_mps_istft_kernel.h"
 
-// Rebuild marker: v3 (ensure updated Metal header logic is recompiled).
+// Rebuild marker: v5 (remove redundant bounds checks + tiled interior fast path).
 
 static inline id<MTLBuffer> getMTLBufferStorage(const torch::Tensor& tensor) {
   return __builtin_bit_cast(id<MTLBuffer>, tensor.storage().data());
