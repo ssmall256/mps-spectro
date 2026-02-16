@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mps-spectro"
+version = "0.1.0"
+description = "Fast torch-compatible STFT and ISTFT on Apple MPS via custom Metal kernels"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "torch>=2.10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mps_spectro = ["metal/*.mm", "metal/*.h"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "perf: optional performance smoke checks",
+]
+filterwarnings = [
+    'ignore:An output with one or more elements was resized since it had shape \[\], which does not match the required output shape .*:UserWarning',
+]
