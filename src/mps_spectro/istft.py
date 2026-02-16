@@ -188,7 +188,8 @@ def _check_nola_safety(
         return
 
     window_sq_cpu = window_sq.detach().to("cpu")
-    digest = hashlib.blake2b(window_sq_cpu.numpy().tobytes(), digest_size=16).hexdigest()
+    raw = window_sq_cpu.contiguous().untyped_storage()
+    digest = hashlib.blake2b(bytes(raw), digest_size=16).hexdigest()
     key = (
         n_fft,
         hop_length,
