@@ -43,6 +43,7 @@ def bench_mps(fn, *, warmup: int = 5, iters: int = 20) -> float:
         torch.mps.synchronize()
         times.append((time.perf_counter() - t0) * 1e3)
     times.sort()
+    torch.mps.empty_cache()
     return times[len(times) // 2]
 
 
@@ -63,16 +64,20 @@ def bench_cpu(fn, *, warmup: int = 5, iters: int = 20) -> float:
 # ---------------------------------------------------------------------------
 
 # (batch, signal_length, n_fft, label)
+# Configs representative of real audio workloads:
+#   - Speech/TTS training: B=4-16, 3-10s @ 16-24kHz, nfft=1024
+#   - Music/enhancement: B=4-8, 5-10s @ 44.1kHz, nfft=2048
+#   - Single-item inference: B=1, 10s @ 16kHz
 CONFIGS = [
-    # Small workloads (below 5 MB threshold → torch.stft fallback)
-    (1, 16000, 512, "B=1 T=16k nfft=512"),
-    (4, 16000, 512, "B=4 T=16k nfft=512"),
-    # Medium workloads
+    # Single-batch (inference-like)
     (1, 160000, 1024, "B=1 T=160k nfft=1024"),
+    # Typical training batches
     (4, 160000, 1024, "B=4 T=160k nfft=1024"),
     (4, 160000, 2048, "B=4 T=160k nfft=2048"),
-    # Large workloads
     (8, 160000, 1024, "B=8 T=160k nfft=1024"),
+    (16, 160000, 1024, "B=16 T=160k nfft=1024"),
+    # Long-sequence / high-sample-rate
+    (4, 480000, 1024, "B=4 T=480k nfft=1024"),
     (4, 1320000, 1024, "B=4 T=1.3M nfft=1024"),
     (1, 1320000, 1024, "B=1 T=1.3M nfft=1024"),
 ]
