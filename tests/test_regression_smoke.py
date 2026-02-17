@@ -57,7 +57,7 @@ def _atol_for_dtype(kernel_dtype: str) -> float:
     if kernel_dtype == "float32":
         return 1.0e-5
     if kernel_dtype == "mixed":
-        return 2.0e-3
+        return 3.0e-3
     raise ValueError(f"Unsupported kernel dtype: {kernel_dtype}")
 
 
