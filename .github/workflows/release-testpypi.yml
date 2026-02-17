@@ -1,0 +1,98 @@
+name: Release RC (TestPyPI)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish and verify (for example: 0.1.0rc1)"
+        required: true
+        type: string
+
+jobs:
+  build-artifacts:
+    name: Build RC artifacts
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install packaging tools
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Validate metadata
+        run: python -m twine check dist/*
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-artifacts
+          path: dist/*
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    runs-on: ubuntu-24.04
+    needs: [build-artifacts]
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-artifacts
+          path: dist
+
+      - name: Publish package distributions to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          attestations: false
+
+  smoke-macos:
+    name: Smoke install from TestPyPI (macOS)
+    runs-on: macos-latest
+    needs: [publish-testpypi]
+    env:
+      PACKAGE_VERSION: ${{ github.event.inputs.version }}
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install from TestPyPI
+        run: |
+          python -m pip install --upgrade pip
+          for i in {1..12}; do
+            python -m pip install \
+              --index-url https://test.pypi.org/simple/ \
+              --extra-index-url https://pypi.org/simple \
+              "mps-spectro==${PACKAGE_VERSION}" && break
+            if [ "$i" -eq 12 ]; then
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - name: Smoke test
+        run: |
+          python -c "
+          import torch
+          from mps_spectro import stft, istft
+          assert torch.backends.mps.is_available(), 'MPS not available'
+          x = torch.randn(1, 4096, device='mps')
+          window = torch.hann_window(1024, device='mps')
+          z = stft(x, n_fft=1024, hop_length=256, center=True)
+          y = istft(z, n_fft=1024, hop_length=256, window=window, center=True, length=4096)
+          assert z.shape == (1, 513, 13), f'unexpected stft shape: {z.shape}'
+          assert y.shape == (1, 4096), f'unexpected istft shape: {y.shape}'
+          print(f'mps-spectro smoke test passed')
+          " 2>&1 | head -20
