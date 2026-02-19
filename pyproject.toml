@@ -9,7 +9,7 @@ description = "Fast torch-compatible STFT and ISTFT on Apple MPS via custom Meta
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-authors = [{ name = "Sam", email = "ssmall256@users.noreply.github.com" }]
+authors = [{ name = "ssmall256", email = "ssmall256@users.noreply.github.com" }]
 keywords = ["pytorch", "stft", "istft", "spectral", "audio", "dsp", "apple-silicon", "mps", "metal"]
 classifiers = [
     "Development Status :: 4 - Beta",
