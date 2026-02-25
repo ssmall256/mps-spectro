@@ -39,9 +39,6 @@ Issues = "https://github.com/ssmall256/mps-spectro/issues"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools.package-data]
-mps_spectro = ["metal/*.mm", "metal/*.h"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

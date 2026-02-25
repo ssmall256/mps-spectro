@@ -3,7 +3,7 @@ from typing import Optional
 
 import torch
 
-from mps_spectro.compiler import compiled_lib
+from mps_spectro import compiler
 
 
 def _validate_input(x: torch.Tensor) -> tuple[torch.Tensor, bool]:
@@ -118,7 +118,7 @@ def mps_stft_forward(
                 x, window_nfft, int(hop_length), int(n_fft), bool(center),
             )
         else:
-            frames = compiled_lib.mps_stft_extract_frames(
+            frames = compiler.mps_stft_extract_frames(
                 x, window_nfft, int(hop_length), int(n_fft), bool(center)
             )
 

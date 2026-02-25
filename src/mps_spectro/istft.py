@@ -1,5 +1,4 @@
 import os
-import hashlib
 import warnings
 from collections import OrderedDict
 from typing import Optional
@@ -9,7 +8,7 @@ import torch
 # Allow fallback when a dependent op is unavailable on MPS.
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
-from mps_spectro.compiler import compiled_lib
+from mps_spectro import compiler
 
 _SAFETY_CACHE_MAX = 256
 _SAFETY_CACHE: "OrderedDict[tuple, tuple[bool, float]]" = OrderedDict()
@@ -91,22 +90,22 @@ def _choose_layout_auto(
     def _run(layout: str) -> None:
         if kernel_dtype == "mixed":
             if layout == "native":
-                _ = compiled_lib.mps_istft_overlap_add_div_envelope_mixed(
+                _ = compiler.mps_istft_overlap_add_div_envelope_mixed(
                     frames_native, window_for_kernel, window_sq_for_kernel, int(hop_length), int(full_length)
                 )
             else:
                 frames_transposed = frames_native.transpose(-1, -2).contiguous()
-                _ = compiled_lib.mps_istft_overlap_add_div_envelope_mixed_transposed(
+                _ = compiler.mps_istft_overlap_add_div_envelope_mixed_transposed(
                     frames_transposed, window_for_kernel, window_sq_for_kernel, int(hop_length), int(full_length)
                 )
         else:
             if layout == "native":
-                _ = compiled_lib.mps_istft_overlap_add_div_envelope(
+                _ = compiler.mps_istft_overlap_add_div_envelope(
                     frames_native, window_for_kernel, window_sq_for_kernel, int(hop_length), int(full_length)
                 )
             else:
                 frames_transposed = frames_native.transpose(-1, -2).contiguous()
-                _ = compiled_lib.mps_istft_overlap_add_div_envelope_transposed(
+                _ = compiler.mps_istft_overlap_add_div_envelope_transposed(
                     frames_transposed, window_for_kernel, window_sq_for_kernel, int(hop_length), int(full_length)
                 )
 
@@ -187,20 +186,21 @@ def _check_nola_safety(
     if safety == "off":
         return
 
-    window_sq_cpu = window_sq.detach().to("cpu")
-    raw = window_sq_cpu.contiguous().untyped_storage()
-    digest = hashlib.blake2b(bytes(raw), digest_size=16).hexdigest()
-    key = (
+    # Fast-path cache lookup using data_ptr() to avoid GPU→CPU transfer.
+    # data_ptr() uniquely identifies the underlying Metal buffer; combined with
+    # the STFT parameters it gives a reliable cache key without hashing the
+    # window contents every call.
+    fast_key = (
         n_fft,
         hop_length,
-        int(window_sq_cpu.numel()),
+        int(window_sq.numel()),
         bool(center),
         int(n_frames),
         int(length) if length is not None else -1,
-        digest,
+        window_sq.data_ptr(),
     )
     if safety == "auto":
-        cached = _cache_get(key)
+        cached = _cache_get(fast_key)
         if cached is not None:
             ok, min_abs = cached
             if (not ok) and torch_like:
@@ -208,6 +208,9 @@ def _check_nola_safety(
                     f"istft: window overlap-add envelope is too small (cached: min={min_abs:.3e})"
                 )
             return
+
+    # Slow path: copy window to CPU and compute the overlap-add envelope.
+    window_sq_cpu = window_sq.detach().to("cpu")
 
     out_len = hop_length * (n_frames - 1) + n_fft
     denom = torch.zeros(out_len, dtype=torch.float32)
@@ -229,7 +232,7 @@ def _check_nola_safety(
     ok = min_abs >= 1.0e-11
 
     if safety == "auto":
-        _cache_set(key, (ok, min_abs))
+        _cache_set(fast_key, (ok, min_abs))
 
     if (not ok) and torch_like:
         raise RuntimeError(
@@ -431,7 +434,7 @@ def mps_istft_forward(
 
     if kernel_dtype == "mixed":
         if selected_layout == "native":
-            y = compiled_lib.mps_istft_overlap_add_div_envelope_mixed(
+            y = compiler.mps_istft_overlap_add_div_envelope_mixed(
                 frames_for_kernel,
                 window_for_kernel,
                 window_sq_for_kernel,
@@ -439,7 +442,7 @@ def mps_istft_forward(
                 int(full_length),
             )
         else:
-            y = compiled_lib.mps_istft_overlap_add_div_envelope_mixed_transposed(
+            y = compiler.mps_istft_overlap_add_div_envelope_mixed_transposed(
                 frames_for_kernel_transposed,
                 window_for_kernel,
                 window_sq_for_kernel,
@@ -448,7 +451,7 @@ def mps_istft_forward(
             )
     else:
         if selected_layout == "native":
-            y = compiled_lib.mps_istft_overlap_add_div_envelope(
+            y = compiler.mps_istft_overlap_add_div_envelope(
                 frames_for_kernel,
                 window_for_kernel,
                 window_sq_for_kernel,
@@ -456,7 +459,7 @@ def mps_istft_forward(
                 int(full_length),
             )
         else:
-            y = compiled_lib.mps_istft_overlap_add_div_envelope_transposed(
+            y = compiler.mps_istft_overlap_add_div_envelope_transposed(
                 frames_for_kernel_transposed,
                 window_for_kernel,
                 window_sq_for_kernel,

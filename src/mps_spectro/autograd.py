@@ -39,9 +39,9 @@ class STFTExtractFrames(torch.autograd.Function):
         n_fft: int,
         center: bool,
     ) -> torch.Tensor:
-        from mps_spectro.compiler import compiled_lib
+        from mps_spectro import compiler
 
-        frames = compiled_lib.mps_stft_extract_frames(
+        frames = compiler.mps_stft_extract_frames(
             input, window, int(hop_length), int(n_fft), bool(center),
         )
         # Save what we need for backward.
@@ -58,9 +58,9 @@ class STFTExtractFrames(torch.autograd.Function):
 
         grad_input = None
         if ctx.needs_input_grad[0]:
-            from mps_spectro.compiler import compiled_lib
+            from mps_spectro import compiler
 
-            grad_input = compiled_lib.mps_stft_backward_input(
+            grad_input = compiler.mps_stft_backward_input(
                 grad_frames.contiguous(),
                 window,
                 ctx.input_length,
@@ -99,9 +99,9 @@ class ISTFTOverlapAdd(torch.autograd.Function):
         hop_length: int,
         output_length: int,
     ) -> torch.Tensor:
-        from mps_spectro.compiler import compiled_lib
+        from mps_spectro import compiler
 
-        y = compiled_lib.mps_istft_overlap_add_div_envelope(
+        y = compiler.mps_istft_overlap_add_div_envelope(
             frames, window, window_sq, int(hop_length), int(output_length),
         )
         ctx.save_for_backward(window, window_sq)
@@ -119,9 +119,9 @@ class ISTFTOverlapAdd(torch.autograd.Function):
 
         grad_frames = None
         if ctx.needs_input_grad[0]:
-            from mps_spectro.compiler import compiled_lib
+            from mps_spectro import compiler
 
-            grad_frames = compiled_lib.mps_istft_backward_frames(
+            grad_frames = compiler.mps_istft_backward_frames(
                 grad_output.contiguous(),
                 window,
                 window_sq,
