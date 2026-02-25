@@ -6,6 +6,7 @@ build/
 .pytest_cache/
 .DS_Store
 .venv/
+.bench-venv/
 .torch_extensions/
 .python-version
 uv.lock
