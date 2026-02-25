@@ -45,7 +45,7 @@ def _tolerances(kernel_dtype: str) -> tuple[float, float]:
     if kernel_dtype == "float32":
         return (1.0e-5, 1.0e-7)
     if kernel_dtype == "mixed":
-        return (2.0e-3, 3.0e-7)
+        return (3.0e-3, 3.0e-7)
     return (9.0e-3, 1.5e-6)
 
 

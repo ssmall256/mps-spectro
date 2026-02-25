@@ -370,13 +370,11 @@ def mps_istft_forward(
         torch_like=bool(torch_like),
     )
 
-    # Autograd path: force float32 native layout and wrap the Metal kernel
-    # so that gradients flow through the overlap-add + envelope division.
+    # Autograd path: force float32 native layout and dispatch through the
+    # registered custom op so that gradients flow and torch.compile can trace.
     if time_frames.requires_grad:
-        from mps_spectro.autograd import ISTFTOverlapAdd
-
         frames_for_kernel = time_frames.contiguous()
-        y = ISTFTOverlapAdd.apply(
+        y = torch.ops.mps_spectro.istft_overlap_add(
             frames_for_kernel,
             window,
             window_sq,

@@ -1,5 +1,7 @@
 """mps-spectro: Fast torch-compatible STFT/ISTFT on Apple MPS via custom Metal kernels."""
 
+import mps_spectro._torch_ops as _torch_ops  # noqa: F401 — register custom ops
+
 from mps_spectro.stft import mps_stft_forward as stft
 from mps_spectro.istft import mps_istft_forward as istft
 

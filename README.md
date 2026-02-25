@@ -27,6 +27,7 @@ pip install mps-spectro
 - PyTorch-compatible STFT/ISTFT semantics (same parameters as `torch.stft` / `torch.istft`)
 - Fused overlap-add with optimized Metal compute shaders
 - Autograd support with custom Metal backward kernels
+- `torch.compile` compatible (`aot_eager` backend) via `torch.library` custom ops
 - Pure Python — no C++ build step, no Xcode CLI tools
 
 ### Autograd
@@ -45,6 +46,18 @@ print(x.grad.shape)  # torch.Size([4, 16000])
 ```
 
 When `requires_grad=False` (the default), zero overhead -- the original Metal kernel path is used directly. Backward passes use custom Metal kernels for GPU-accelerated gradient computation. Window gradients are not computed (returns `None`) since windows are almost always frozen in practice.
+
+### torch.compile
+
+Custom ops are registered via `torch.library` with Meta (FakeTensor) kernels, so `torch.compile` can trace through both forward and backward:
+
+```python
+@torch.compile(backend="aot_eager")
+def f(x):
+    return stft(x, n_fft=2048, hop_length=512)
+
+f(torch.randn(4, 160000, device="mps"))  # works
+```
 
 ### ISTFT extras
 
