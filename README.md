@@ -117,7 +117,9 @@ Apple M4 Max, macOS 26.3, PyTorch 2.10.0, 20 iterations (5 warmup).
 | B=4 T=1.3M nfft=1024 | 18.42 ms | 11.07 ms | 1.7x |
 | B=1 T=1.3M nfft=1024 | 4.60 ms | 2.39 ms | 1.9x |
 
-To reproduce: `python scripts/benchmark.py`
+To reproduce:
+- Full suite: `python scripts/benchmark.py`
+- Dispatch overhead profile: `python scripts/benchmark.py --dispatch-profile`
 
 ### STFT/iSTFT in audio-separator workloads
 

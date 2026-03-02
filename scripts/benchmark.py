@@ -18,6 +18,7 @@ import argparse
 import platform
 import time
 import warnings
+from statistics import median
 
 import torch
 
@@ -58,6 +59,26 @@ def bench_cpu(fn, *, warmup: int = 5, iters: int = 20) -> float:
         times.append((time.perf_counter() - t0) * 1e3)
     times.sort()
     return times[len(times) // 2]
+
+
+def bench_mps_trimmed(fn, *, warmup: int = 5, iters: int = 20) -> float:
+    """Return median latency in ms using 20% trimmed samples on MPS."""
+    for _ in range(warmup):
+        fn()
+    torch.mps.synchronize()
+
+    samples: list[float] = []
+    for _ in range(iters):
+        t0 = time.perf_counter()
+        fn()
+        torch.mps.synchronize()
+        samples.append((time.perf_counter() - t0) * 1e3)
+
+    samples.sort()
+    trim = max(1, len(samples) // 5)
+    trimmed = samples[trim:-trim] if len(samples) > (2 * trim) else samples
+    torch.mps.empty_cache()
+    return float(median(trimmed))
 
 # ---------------------------------------------------------------------------
 # Configurations
@@ -278,6 +299,165 @@ def bench_roundtrip(warmup: int, iters: int) -> None:
         rows.append((label, t_cpu, t_torch, t_mps))
     _print_table("Roundtrip (STFT → ISTFT) Forward + Backward", rows)
 
+
+# ---------------------------------------------------------------------------
+# Dispatch profiling
+# ---------------------------------------------------------------------------
+
+def _stft_n_frames(*, n_fft: int, hop_length: int, length: int, center: bool) -> int:
+    pad = n_fft // 2 if center else 0
+    padded_length = length + (2 * pad)
+    return (padded_length - n_fft) // hop_length + 1
+
+
+def bench_dispatch_profile(
+    warmup: int,
+    iters: int,
+    *,
+    n_fft: int = 2048,
+    hop_length: int = 512,
+) -> None:
+    """Profile wrapper dispatch overhead against kernel and FFT floors."""
+    print("\n### Dispatch Profile\n")
+
+    configs = [
+        ("B=4 T=160k", 4, 160_000),
+        ("B=4 T=1.3M", 4, 1_300_000),
+        ("B=8 T=480k", 8, 480_000),
+    ]
+
+    stft_rows: list[dict] = []
+    istft_rows: list[dict] = []
+
+    for label, batch, length in configs:
+        x = torch.randn(batch, length, device="mps", dtype=torch.float32)
+        window = torch.hann_window(n_fft, periodic=True, device="mps", dtype=torch.float32)
+        window_sq = (window * window).contiguous()
+
+        # STFT: full API path
+        eager_stft_ms = bench_mps_trimmed(
+            lambda: mps_stft_forward(
+                x,
+                n_fft=n_fft,
+                hop_length=hop_length,
+                window=window,
+                center=True,
+                normalized=False,
+                onesided=True,
+            ),
+            warmup=warmup,
+            iters=iters,
+        )
+
+        # STFT: explicit kernel path (reflect-pad + frame extract + FFT)
+        direct_stft_ms = bench_mps_trimmed(
+            lambda: torch.fft.rfft(
+                torch.ops.mps_spectro.stft_extract_frames(
+                    x,
+                    window,
+                    int(hop_length),
+                    int(n_fft),
+                    True,
+                ),
+                n=n_fft,
+                dim=-1,
+                norm="backward",
+            ),
+            warmup=warmup,
+            iters=iters,
+        )
+
+        n_frames = _stft_n_frames(n_fft=n_fft, hop_length=hop_length, length=length, center=True)
+        frames = torch.randn(batch, n_frames, n_fft, device="mps", dtype=torch.float32)
+        fft_floor_ms = bench_mps_trimmed(
+            lambda: torch.fft.rfft(frames, n=n_fft, dim=-1, norm="backward"),
+            warmup=warmup,
+            iters=iters,
+        )
+
+        stft_rows.append(
+            {
+                "label": label,
+                "eager": eager_stft_ms,
+                "direct": direct_stft_ms,
+                "fft_floor": fft_floor_ms,
+                "dispatch": max(0.0, eager_stft_ms - direct_stft_ms),
+            }
+        )
+
+        spec = torch.stft(
+            x,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            window=window,
+            center=True,
+            return_complex=True,
+        )
+
+        # ISTFT: full API path
+        eager_istft_ms = bench_mps_trimmed(
+            lambda: mps_istft_forward(
+                spec,
+                n_fft=n_fft,
+                hop_length=hop_length,
+                window=window,
+                center=True,
+                length=length,
+            ),
+            warmup=warmup,
+            iters=iters,
+        )
+
+        # ISTFT: explicit kernel path (iFFT + overlap-add kernel)
+        direct_istft_ms = bench_mps_trimmed(
+            lambda: torch.ops.mps_spectro.istft_overlap_add(
+                torch.fft.irfft(spec, n=n_fft, dim=-2, norm="backward").transpose(-1, -2).contiguous(),
+                window,
+                window_sq,
+                int(hop_length),
+                int(hop_length * (spec.size(-1) - 1) + n_fft),
+            ),
+            warmup=warmup,
+            iters=iters,
+        )
+
+        ifft_floor_ms = bench_mps_trimmed(
+            lambda: torch.fft.irfft(spec, n=n_fft, dim=-2, norm="backward"),
+            warmup=warmup,
+            iters=iters,
+        )
+
+        istft_rows.append(
+            {
+                "label": label,
+                "eager": eager_istft_ms,
+                "direct": direct_istft_ms,
+                "ifft_floor": ifft_floor_ms,
+                "dispatch": max(0.0, eager_istft_ms - direct_istft_ms),
+            }
+        )
+
+    print(f"STFT dispatch profile (n_fft={n_fft}, hop={hop_length})")
+    print("| Config | Eager (ms) | Direct path (ms) | FFT floor (ms) | Dispatch est (ms) | Direct speedup |")
+    print("|---|--:|--:|--:|--:|--:|")
+    for row in stft_rows:
+        speedup = row["eager"] / max(row["direct"], 1e-6)
+        print(
+            f"| {row['label']} | {row['eager']:.3f} | {row['direct']:.3f} | "
+            f"{row['fft_floor']:.3f} | {row['dispatch']:.3f} | {speedup:.2f}x |"
+        )
+
+    print()
+    print(f"ISTFT dispatch profile (n_fft={n_fft}, hop={hop_length})")
+    print("| Config | Eager (ms) | Direct path (ms) | iFFT floor (ms) | Dispatch est (ms) | Direct speedup |")
+    print("|---|--:|--:|--:|--:|--:|")
+    for row in istft_rows:
+        speedup = row["eager"] / max(row["direct"], 1e-6)
+        print(
+            f"| {row['label']} | {row['eager']:.3f} | {row['direct']:.3f} | "
+            f"{row['ifft_floor']:.3f} | {row['dispatch']:.3f} | {speedup:.2f}x |"
+        )
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -290,6 +470,23 @@ def main() -> None:
                         help="Run forward benchmarks only")
     parser.add_argument("--backward", action="store_true",
                         help="Run backward benchmarks only")
+    parser.add_argument(
+        "--dispatch-profile",
+        action="store_true",
+        help="Run focused wrapper-vs-kernel dispatch profiling",
+    )
+    parser.add_argument(
+        "--dispatch-nfft",
+        type=int,
+        default=2048,
+        help="FFT size for --dispatch-profile",
+    )
+    parser.add_argument(
+        "--dispatch-hop",
+        type=int,
+        default=512,
+        help="Hop length for --dispatch-profile",
+    )
     args = parser.parse_args()
 
     warmup = 3 if args.quick else 5
@@ -305,6 +502,15 @@ def main() -> None:
 
     run_forward = not args.backward
     run_backward = not args.forward
+
+    if args.dispatch_profile:
+        bench_dispatch_profile(
+            warmup,
+            iters,
+            n_fft=args.dispatch_nfft,
+            hop_length=args.dispatch_hop,
+        )
+        return
 
     if run_forward:
         bench_stft_forward(warmup, iters)
