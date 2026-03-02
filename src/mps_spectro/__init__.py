@@ -5,5 +5,5 @@ import mps_spectro._torch_ops as _torch_ops  # noqa: F401 — register custom op
 from mps_spectro.stft import mps_stft_forward as stft
 from mps_spectro.istft import mps_istft_forward as istft
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 __all__ = ["stft", "istft"]
