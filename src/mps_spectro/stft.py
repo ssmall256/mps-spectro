@@ -1,9 +1,13 @@
 import math
+from collections import OrderedDict
 from typing import Optional
 
 import torch
 
 from mps_spectro import compiler
+
+_WINDOW_CACHE_MAX = 64
+_WINDOW_CACHE: "OrderedDict[tuple, torch.Tensor]" = OrderedDict()
 
 
 def _should_use_metal_stft(
@@ -31,6 +35,22 @@ def _validate_input(x: torch.Tensor) -> tuple[torch.Tensor, bool]:
     return x, orig_1d
 
 
+def _window_cache_get(key: tuple) -> Optional[torch.Tensor]:
+    value = _WINDOW_CACHE.get(key)
+    if value is None:
+        return None
+    _WINDOW_CACHE.move_to_end(key)
+    return value
+
+
+def _window_cache_set(key: tuple, value: torch.Tensor) -> torch.Tensor:
+    _WINDOW_CACHE[key] = value
+    _WINDOW_CACHE.move_to_end(key)
+    if len(_WINDOW_CACHE) > _WINDOW_CACHE_MAX:
+        _WINDOW_CACHE.popitem(last=False)
+    return value
+
+
 def _resolve_window(
     window: Optional[torch.Tensor],
     *,
@@ -39,6 +59,10 @@ def _resolve_window(
     device: torch.device,
 ) -> torch.Tensor:
     if window is None:
+        key = ("hann", int(win_length), int(n_fft), device.type, device.index)
+        cached = _window_cache_get(key)
+        if cached is not None:
+            return cached
         w = torch.hann_window(win_length, periodic=True, device=device, dtype=torch.float32)
     else:
         if window.dim() != 1:
@@ -46,7 +70,10 @@ def _resolve_window(
         w = window.to(device=device, dtype=torch.float32)
 
     if int(w.numel()) == int(n_fft):
-        return w.contiguous()
+        out = w.contiguous()
+        if window is None:
+            return _window_cache_set(key, out)
+        return out
     if int(w.numel()) != int(win_length):
         raise ValueError(
             f"window length must be win_length ({win_length}) or n_fft ({n_fft}), got {int(w.numel())}"
@@ -54,7 +81,10 @@ def _resolve_window(
 
     left = (n_fft - win_length) // 2
     right = (n_fft - win_length + 1) // 2
-    return torch.nn.functional.pad(w, (left, right)).contiguous()
+    out = torch.nn.functional.pad(w, (left, right)).contiguous()
+    if window is None:
+        return _window_cache_set(key, out)
+    return out
 
 
 def mps_stft_forward(

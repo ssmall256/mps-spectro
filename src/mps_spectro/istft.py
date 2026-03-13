@@ -19,6 +19,8 @@ _LAYOUT_MAX_REL_SPREAD = 0.25
 _LAYOUT_PROBE_ROUNDS = 5
 _LAYOUT_PROBE_ITERS = 3
 _LAYOUT_SMALL_INPUT_NUMEL_THRESHOLD = 50_000
+_WINDOW_CACHE_MAX = 64
+_WINDOW_CACHE: "OrderedDict[tuple, tuple[torch.Tensor, torch.Tensor]]" = OrderedDict()
 
 
 def _validate_input(spec: torch.Tensor) -> torch.Tensor:
@@ -61,6 +63,22 @@ def _layout_cache_set(key: tuple, value: str) -> None:
     _LAYOUT_CACHE.move_to_end(key)
     if len(_LAYOUT_CACHE) > _LAYOUT_CACHE_MAX:
         _LAYOUT_CACHE.popitem(last=False)
+
+
+def _window_cache_get(key: tuple) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+    val = _WINDOW_CACHE.get(key)
+    if val is None:
+        return None
+    _WINDOW_CACHE.move_to_end(key)
+    return val
+
+
+def _window_cache_set(key: tuple, value: tuple[torch.Tensor, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+    _WINDOW_CACHE[key] = value
+    _WINDOW_CACHE.move_to_end(key)
+    if len(_WINDOW_CACHE) > _WINDOW_CACHE_MAX:
+        _WINDOW_CACHE.popitem(last=False)
+    return value
 
 
 def _choose_layout_auto(
@@ -294,10 +312,17 @@ def mps_istft_forward(
         raise ValueError("kernel_layout must be one of {'auto', 'native', 'transposed'}")
 
     if window is None:
-        window = torch.hann_window(win_length, periodic=True, device=spec.device, dtype=torch.float32)
+        key = ("hann", int(win_length), spec.device.type, spec.device.index)
+        cached = _window_cache_get(key)
+        if cached is None:
+            window = torch.hann_window(win_length, periodic=True, device=spec.device, dtype=torch.float32).contiguous()
+            window_sq = (window * window).contiguous()
+            window, window_sq = _window_cache_set(key, (window, window_sq))
+        else:
+            window, window_sq = cached
     else:
-        window = window.to(device=spec.device, dtype=torch.float32)
-    window_sq = (window * window).contiguous()
+        window = window.to(device=spec.device, dtype=torch.float32).contiguous()
+        window_sq = (window * window).contiguous()
 
     norm = "ortho" if normalized else "backward"
 
