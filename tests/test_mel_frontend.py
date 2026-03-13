@@ -219,6 +219,8 @@ def test_compat_matches_linkseg_style_db_frontend(device_name: str) -> None:
 def _load_rvmpe_module():
     repo_root = Path(__file__).resolve().parents[2]
     path = repo_root / "RVMPE" / "rmvpe.py"
+    if not path.exists():
+        pytest.skip("local sibling RVMPE checkout not available")
     spec = importlib.util.spec_from_file_location("rvmpe_local_for_test", path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
