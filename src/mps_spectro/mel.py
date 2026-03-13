@@ -236,6 +236,24 @@ def _stft_for_mel(
     )
 
 
+def _spectral_power(spec: torch.Tensor, power: float) -> torch.Tensor:
+    if spec.is_complex():
+        if power == 1.0:
+            return spec.abs()
+        if power == 2.0:
+            return spec.real.square() + spec.imag.square()
+        return spec.abs().pow(float(power))
+    if spec.ndim >= 4 and spec.shape[-1] == 2:
+        real = spec[..., 0]
+        imag = spec[..., 1]
+        if power == 1.0:
+            return torch.sqrt(real.square() + imag.square())
+        if power == 2.0:
+            return real.square() + imag.square()
+        return torch.sqrt(real.square() + imag.square()).pow(float(power))
+    raise RuntimeError(f"Unsupported STFT output shape: {tuple(spec.shape)}")
+
+
 def mel_spectrogram(
     x: torch.Tensor,
     *,
@@ -286,9 +304,7 @@ def mel_spectrogram(
         use_mps_kernels=use_mps_kernels,
     )
 
-    magnitude = spec.abs()
-    if power != 1.0:
-        magnitude = magnitude.pow(float(power))
+    magnitude = _spectral_power(spec, float(power))
 
     if _projection_fbanks is None:
         fbanks = melscale_fbanks(

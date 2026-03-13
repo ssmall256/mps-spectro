@@ -104,15 +104,8 @@ def test_db_output_matches_torchaudio(device_name: str) -> None:
     assert actual.shape == expected.shape
     max_abs = float((actual - expected).abs().max().item())
     mean_abs = float((actual - expected).abs().mean().item())
-    if device_name == "mps":
-        rel = (actual - expected).abs() / (expected.abs() + 1e-8)
-        max_rel = float(rel.max().item())
-        mean_rel = float(rel.mean().item())
-        assert max_rel <= 5.0e-5
-        assert mean_rel <= 5.0e-6
-    else:
-        assert max_abs <= 5.0e-4
-        assert mean_abs <= 5.0e-5
+    assert max_abs <= 5.0e-4
+    assert mean_abs <= 5.0e-5
 
 
 @pytest.mark.parametrize("device_name", ["cpu", pytest.param("mps", marks=pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS required"))])
@@ -145,17 +138,15 @@ def test_linear_output_matches_torchaudio_linkseg_like_config(device_name: str) 
     actual = ours(wav)
 
     assert actual.shape == expected.shape
-    max_abs = float((actual - expected).abs().max().item())
-    mean_abs = float((actual - expected).abs().mean().item())
+    rel = (actual - expected).abs() / (expected.abs() + 1e-8)
+    max_rel = float(rel.max().item())
+    mean_rel = float(rel.mean().item())
     if device_name == "mps":
-        rel = (actual - expected).abs() / (expected.abs() + 1e-8)
-        max_rel = float(rel.max().item())
-        mean_rel = float(rel.mean().item())
         assert max_rel <= 5.0e-5
         assert mean_rel <= 5.0e-6
     else:
-        assert max_abs <= 5.0e-4
-        assert mean_abs <= 5.0e-5
+        assert max_rel <= 1.0e-6
+        assert mean_rel <= 1.0e-7
 
 
 def test_amplitude_to_db_matches_torchaudio() -> None:
