@@ -301,6 +301,7 @@ def dynamic_spectrogram(
     speed: float = 1.0,
     target_n_freqs: int | None = None,
     magnitude_eps: float = 0.0,
+    use_public_stft: bool = False,
     window_fn: Callable[..., torch.Tensor] = torch.hann_window,
     use_mps_kernels: bool = True,
 ) -> torch.Tensor:
@@ -324,16 +325,30 @@ def dynamic_spectrogram(
         dtype=dtype,
         window_fn=window_fn,
     )
-    spec = _stft_for_mel(
-        x,
-        n_fft=n_fft_dynamic,
-        hop_length=hop_length_dynamic,
-        win_length=win_length_dynamic,
-        window=window_t,
-        center=center,
-        pad_mode=pad_mode,
-        use_mps_kernels=use_mps_kernels,
-    )
+    if use_public_stft and use_mps_kernels and x.device.type == "mps":
+        from mps_spectro import stft as public_stft
+
+        spec = public_stft(
+            x,
+            n_fft=n_fft_dynamic,
+            hop_length=hop_length_dynamic,
+            win_length=win_length_dynamic,
+            window=window_t,
+            center=center,
+            normalized=False,
+            onesided=True,
+        )
+    else:
+        spec = _stft_for_mel(
+            x,
+            n_fft=n_fft_dynamic,
+            hop_length=hop_length_dynamic,
+            win_length=win_length_dynamic,
+            window=window_t,
+            center=center,
+            pad_mode=pad_mode,
+            use_mps_kernels=use_mps_kernels,
+        )
     if float(magnitude_eps) != 0.0 and float(power) == 1.0:
         if spec.is_complex():
             magnitude = torch.sqrt(spec.real.square() + spec.imag.square() + float(magnitude_eps))
@@ -477,6 +492,7 @@ def dynamic_mel_spectrogram(
     speed: float = 1.0,
     mel_basis: torch.Tensor | None = None,
     magnitude_eps: float = 0.0,
+    use_public_stft: bool = False,
     window_fn: Callable[..., torch.Tensor] = torch.hann_window,
     use_mps_kernels: bool = True,
 ) -> torch.Tensor:
@@ -523,6 +539,7 @@ def dynamic_mel_spectrogram(
         speed=speed,
         target_n_freqs=target_n_freqs,
         magnitude_eps=magnitude_eps,
+        use_public_stft=use_public_stft,
         window_fn=window_fn,
         use_mps_kernels=use_mps_kernels,
     )
@@ -846,6 +863,7 @@ class DynamicMelSpectrogramTransform(MelSpectrogramTransform):
             speed=speed,
             mel_basis=self._external_mel_basis,
             magnitude_eps=0.0,
+            use_public_stft=False,
             window_fn=self.window_fn,
             use_mps_kernels=self.use_mps_kernels,
         )
