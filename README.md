@@ -1,6 +1,6 @@
 # mps-spectro
 
-Drop-in `torch.stft` / `torch.istft` replacements for Apple Silicon — **1.4–3x faster** on MPS via custom Metal kernels.
+Drop-in `torch.stft` / `torch.istft` replacements for Apple Silicon, plus mel frontends built on top of them — **1.4–3x faster** on MPS via custom Metal kernels.
 
 ```python
 # before
@@ -14,6 +14,29 @@ spec = stft(x, n_fft=2048, hop_length=512)
 y = istft(spec, n_fft=2048, hop_length=512, center=True, length=T)
 ```
 
+Log-mel frontend for AMT / ASR-style models:
+
+```python
+from mps_spectro import LogMelSpectrogramTransform
+
+frontend = LogMelSpectrogramTransform(
+    sample_rate=16000,
+    n_fft=2048,
+    hop_length=512,
+    n_mels=256,
+    f_min=30.0,
+    f_max=8000.0,
+    pad_mode="constant",
+    power=1.0,
+    norm="slaney",
+    mel_scale="htk",
+    log_amin=1e-5,
+    log_mode="clamp",
+)
+
+mel = frontend(x)
+```
+
 Drop-in compatible with [python-audio-separator](https://github.com/karaokenerds/python-audio-separator) (MDX, Roformer, Demucs) — **1.4x faster STFT** and **2x faster iSTFT** on stereo 44.1 kHz audio with no model changes. See [benchmarks](#stftistft-in-audio-separator-workloads) below.
 
 ## Install
@@ -25,6 +48,7 @@ pip install mps-spectro
 ## Features
 
 - PyTorch-compatible STFT/ISTFT semantics (same parameters as `torch.stft` / `torch.istft`)
+- PyTorch-native mel frontends built on top of the same spectral core
 - Fused overlap-add with optimized Metal compute shaders
 - Autograd support with custom Metal backward kernels
 - `torch.compile` compatible (`aot_eager` backend) via `torch.library` custom ops
@@ -145,6 +169,16 @@ To reproduce: `python scripts/benchmark_audio_separator.py`
 | hdemucs_mmi (shifts=0) | 4.27e-04 | 44 – 52 | ≥ 71% |
 
 \* MDX int16 diffs are symmetric ±1 LSB rounding noise with zero bias and max ±6 LSBs.
+
+### Log-mel frontend in `mamba_amt`
+
+On the `mamba_amt` log-mel frontend configuration (`16 kHz`, `n_fft=2048`, `hop=512`, `n_mels=256`, `pad_mode="constant"`, `power=1.0`, `norm="slaney"`, `mel_scale="htk"`), the new `LogMelSpectrogramTransform` was about `2.44x` faster than `torchaudio.transforms.MelSpectrogram` on MPS while staying numerically tight:
+
+- torchaudio median: `0.00397 s`
+- `mps-spectro` median: `0.00163 s`
+- speedup: `2.44x`
+- max abs diff: `1.14e-4`
+- mean abs diff: `6.33e-6`
 
 ## Using MLX instead of PyTorch?
 
