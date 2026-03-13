@@ -262,9 +262,11 @@ def mel_spectrogram(
     hop_length: int,
     win_length: int | None = None,
     window: Optional[torch.Tensor] = None,
+    pad: int = 0,
     center: bool = True,
     pad_mode: Literal["constant", "reflect"] = "constant",
     power: float = 2.0,
+    normalized: bool = False,
     n_mels: int = 128,
     f_min: float = 0.0,
     f_max: float | None = None,
@@ -291,6 +293,12 @@ def mel_spectrogram(
         raise ValueError('output_scale must be one of {"linear", "log", "db"}')
     if pad_mode not in ("constant", "reflect"):
         raise ValueError('pad_mode must be one of {"constant", "reflect"}')
+    pad = int(pad)
+    if pad < 0:
+        raise ValueError("pad must be non-negative")
+
+    if pad:
+        x = F.pad(x.unsqueeze(1), (pad, pad), mode="constant").squeeze(1)
 
     window_t = _resolve_window(window, win_length=win_length, device=device, dtype=dtype, window_fn=window_fn)
     spec = _stft_for_mel(
@@ -305,6 +313,8 @@ def mel_spectrogram(
     )
 
     magnitude = _spectral_power(spec, float(power))
+    if normalized:
+        magnitude = magnitude * ((1.0 / math.sqrt(n_fft)) ** float(power))
 
     if _projection_fbanks is None:
         fbanks = melscale_fbanks(
@@ -444,6 +454,10 @@ class MelSpectrogramTransform(torch.nn.Module):
             _projection_fbanks=projection_fbanks,
         )
 
+    @classmethod
+    def compat(cls, **kwargs) -> "CompatMelSpectrogramTransform":
+        return CompatMelSpectrogramTransform(**kwargs)
+
 
 class LogMelSpectrogramTransform(MelSpectrogramTransform):
     def __init__(
@@ -488,9 +502,90 @@ class LogMelSpectrogramTransform(MelSpectrogramTransform):
         )
 
 
+class CompatMelSpectrogramTransform(MelSpectrogramTransform):
+    def __init__(
+        self,
+        *,
+        sample_rate: int = 16000,
+        n_fft: int = 400,
+        win_length: int | None = None,
+        hop_length: int | None = None,
+        f_min: float = 0.0,
+        f_max: float | None = None,
+        pad: int = 0,
+        n_mels: int = 128,
+        window_fn: Callable[..., torch.Tensor] = torch.hann_window,
+        power: float = 2.0,
+        normalized: bool = False,
+        center: bool = True,
+        pad_mode: Literal["constant", "reflect"] = "reflect",
+        norm: MelNorm = None,
+        mel_scale: MelScale = "htk",
+        output_scale: MelOutputScale = "linear",
+        log_amin: float = 1e-5,
+        log_mode: LogMelMode = "clamp",
+        top_db: float | None = None,
+        use_mps_kernels: bool = True,
+    ) -> None:
+        super().__init__(
+            sample_rate=sample_rate,
+            n_fft=n_fft,
+            hop_length=(n_fft // 2) if hop_length is None else hop_length,
+            win_length=win_length,
+            n_mels=n_mels,
+            f_min=f_min,
+            f_max=f_max,
+            center=center,
+            pad_mode=pad_mode,
+            power=power,
+            norm=norm,
+            mel_scale=mel_scale,
+            output_scale=output_scale,
+            log_amin=log_amin,
+            log_mode=log_mode,
+            top_db=top_db,
+            window_fn=window_fn,
+            use_mps_kernels=use_mps_kernels,
+        )
+        self.pad = int(pad)
+        self.normalized = bool(normalized)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        _validate_waveform(x)
+        dtype = torch.float32 if x.dtype in (torch.float16, torch.bfloat16) else x.dtype
+        window = self._resolve_module_window(device=x.device, dtype=dtype)
+        projection_fbanks = self._resolve_module_projection_fbanks(device=x.device, dtype=dtype)
+        return mel_spectrogram(
+            x,
+            sample_rate=self.sample_rate,
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            win_length=self.win_length,
+            window=window,
+            pad=self.pad,
+            center=self.center,
+            pad_mode=self.pad_mode,
+            power=self.power,
+            normalized=self.normalized,
+            n_mels=self.n_mels,
+            f_min=self.f_min,
+            f_max=self.f_max,
+            norm=self.norm,
+            mel_scale=self.mel_scale,
+            output_scale=self.output_scale,
+            log_amin=self.log_amin,
+            log_mode=self.log_mode,
+            top_db=self.top_db,
+            window_fn=self.window_fn,
+            use_mps_kernels=self.use_mps_kernels,
+            _projection_fbanks=projection_fbanks,
+        )
+
+
 __all__ = [
     "MelSpectrogramTransform",
     "LogMelSpectrogramTransform",
+    "CompatMelSpectrogramTransform",
     "mel_spectrogram",
     "melscale_fbanks",
     "amplitude_to_db",

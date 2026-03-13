@@ -3,6 +3,7 @@
 import mps_spectro._torch_ops as _torch_ops  # noqa: F401 — register custom ops
 
 from mps_spectro.mel import (
+    CompatMelSpectrogramTransform,
     LogMelSpectrogramTransform,
     MelSpectrogramTransform,
     amplitude_to_db,
@@ -16,6 +17,7 @@ __version__ = "0.2.2"
 __all__ = [
     "stft",
     "istft",
+    "CompatMelSpectrogramTransform",
     "MelSpectrogramTransform",
     "LogMelSpectrogramTransform",
     "mel_spectrogram",

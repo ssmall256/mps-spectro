@@ -4,7 +4,13 @@ import pytest
 import torch
 import torchaudio
 
-from mps_spectro import LogMelSpectrogramTransform, MelSpectrogramTransform, amplitude_to_db, mel_spectrogram
+from mps_spectro import (
+    CompatMelSpectrogramTransform,
+    LogMelSpectrogramTransform,
+    MelSpectrogramTransform,
+    amplitude_to_db,
+    mel_spectrogram,
+)
 
 
 def _mamba_amt_reference(device: torch.device) -> tuple[torch.nn.Module, LogMelSpectrogramTransform]:
@@ -154,3 +160,51 @@ def test_amplitude_to_db_matches_torchaudio() -> None:
     expected = torchaudio.transforms.AmplitudeToDB()(x)
     actual = amplitude_to_db(x, stype="power", top_db=80.0)
     torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("device_name", ["cpu", pytest.param("mps", marks=pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS required"))])
+def test_compat_matches_linkseg_style_db_frontend(device_name: str) -> None:
+    device = torch.device(device_name)
+    wav = torch.randn(1, 22050 * 4, device=device, dtype=torch.float32)
+    ours = CompatMelSpectrogramTransform(
+        sample_rate=22050,
+        n_fft=1024,
+        hop_length=256,
+        win_length=1024,
+        n_mels=64,
+        f_min=0.0,
+        f_max=11025.0,
+        power=2.0,
+        center=True,
+        pad_mode="reflect",
+        norm=None,
+        mel_scale="htk",
+        output_scale="db",
+        top_db=None,
+    ).to(device)
+    ref = torchaudio.transforms.MelSpectrogram(
+        sample_rate=22050,
+        n_fft=1024,
+        win_length=1024,
+        hop_length=256,
+        f_min=0.0,
+        f_max=11025.0,
+        n_mels=64,
+        window_fn=torch.hann_window,
+        power=2.0,
+        normalized=False,
+        center=True,
+        pad_mode="reflect",
+        norm=None,
+        mel_scale="htk",
+    ).to(device)
+    ref_db = torchaudio.transforms.AmplitudeToDB(top_db=None).to(device)
+
+    expected = ref_db(ref(wav))
+    actual = ours(wav)
+
+    assert actual.shape == expected.shape
+    max_abs = float((actual - expected).abs().max().item())
+    mean_abs = float((actual - expected).abs().mean().item())
+    assert max_abs <= 5.0e-4
+    assert mean_abs <= 5.0e-5
