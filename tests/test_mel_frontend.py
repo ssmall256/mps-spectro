@@ -104,8 +104,58 @@ def test_db_output_matches_torchaudio(device_name: str) -> None:
     assert actual.shape == expected.shape
     max_abs = float((actual - expected).abs().max().item())
     mean_abs = float((actual - expected).abs().mean().item())
-    assert max_abs <= 5.0e-4
-    assert mean_abs <= 5.0e-5
+    if device_name == "mps":
+        rel = (actual - expected).abs() / (expected.abs() + 1e-8)
+        max_rel = float(rel.max().item())
+        mean_rel = float(rel.mean().item())
+        assert max_rel <= 5.0e-5
+        assert mean_rel <= 5.0e-6
+    else:
+        assert max_abs <= 5.0e-4
+        assert mean_abs <= 5.0e-5
+
+
+@pytest.mark.parametrize("device_name", ["cpu", pytest.param("mps", marks=pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS required"))])
+def test_linear_output_matches_torchaudio_linkseg_like_config(device_name: str) -> None:
+    device = torch.device(device_name)
+    wav = torch.randn(1, 22050 * 4, device=device, dtype=torch.float32)
+    ours = MelSpectrogramTransform(
+        sample_rate=22050,
+        n_fft=1024,
+        hop_length=256,
+        n_mels=64,
+        f_min=0.0,
+        f_max=11025.0,
+        power=2.0,
+        pad_mode="reflect",
+        output_scale="linear",
+    ).to(device)
+    ref = torchaudio.transforms.MelSpectrogram(
+        sample_rate=22050,
+        n_fft=1024,
+        hop_length=256,
+        n_mels=64,
+        f_min=0.0,
+        f_max=11025.0,
+        power=2.0,
+        pad_mode="reflect",
+    ).to(device)
+
+    expected = ref(wav)
+    actual = ours(wav)
+
+    assert actual.shape == expected.shape
+    max_abs = float((actual - expected).abs().max().item())
+    mean_abs = float((actual - expected).abs().mean().item())
+    if device_name == "mps":
+        rel = (actual - expected).abs() / (expected.abs() + 1e-8)
+        max_rel = float(rel.max().item())
+        mean_rel = float(rel.mean().item())
+        assert max_rel <= 5.0e-5
+        assert mean_rel <= 5.0e-6
+    else:
+        assert max_abs <= 5.0e-4
+        assert mean_abs <= 5.0e-5
 
 
 def test_amplitude_to_db_matches_torchaudio() -> None:

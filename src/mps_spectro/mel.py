@@ -198,6 +198,17 @@ def _stft_for_mel(
     use_mps_kernels: bool,
 ) -> torch.Tensor:
     if use_mps_kernels and x.device.type == "mps":
+        if center and pad_mode == "reflect":
+            return mps_stft_forward(
+                x,
+                n_fft=n_fft,
+                hop_length=hop_length,
+                win_length=win_length,
+                window=window,
+                center=True,
+                normalized=False,
+                onesided=True,
+            )
         if center:
             pad = n_fft // 2
             x = F.pad(x.unsqueeze(1), (pad, pad), mode=pad_mode).squeeze(1)
@@ -247,6 +258,7 @@ def mel_spectrogram(
     top_db: float | None = 80.0,
     window_fn: Callable[..., torch.Tensor] = torch.hann_window,
     use_mps_kernels: bool = True,
+    _projection_fbanks: torch.Tensor | None = None,
 ) -> torch.Tensor:
     x, orig_1d = _validate_waveform(x)
     device = x.device
@@ -278,19 +290,23 @@ def mel_spectrogram(
     if power != 1.0:
         magnitude = magnitude.pow(float(power))
 
-    fbanks = melscale_fbanks(
-        n_freqs=(n_fft // 2) + 1,
-        f_min=f_min,
-        f_max=f_max,
-        n_mels=n_mels,
-        sample_rate=sample_rate,
-        norm=norm,
-        mel_scale=mel_scale,
-        device=device,
-        dtype=dtype,
-    )
+    if _projection_fbanks is None:
+        fbanks = melscale_fbanks(
+            n_freqs=(n_fft // 2) + 1,
+            f_min=f_min,
+            f_max=f_max,
+            n_mels=n_mels,
+            sample_rate=sample_rate,
+            norm=norm,
+            mel_scale=mel_scale,
+            device=device,
+            dtype=dtype,
+        )
+        projection_fbanks = fbanks.t()
+    else:
+        projection_fbanks = _projection_fbanks
     # Project in [B, T, F] layout to avoid slower broadcasted [1, M, F] matmul on MPS.
-    mel = torch.matmul(magnitude.transpose(-2, -1), fbanks.t()).transpose(-2, -1)
+    mel = torch.matmul(magnitude.transpose(-2, -1), projection_fbanks).transpose(-2, -1)
     if output_scale == "linear":
         out = mel
     elif output_scale == "log":
@@ -346,14 +362,55 @@ class MelSpectrogramTransform(torch.nn.Module):
         self.top_db = None if top_db is None else float(top_db)
         self.window_fn = window_fn
         self.use_mps_kernels = bool(use_mps_kernels)
+        self._resolved_window_cache_key: tuple | None = None
+        self._resolved_window: torch.Tensor | None = None
+        self._resolved_projection_fbanks_cache_key: tuple | None = None
+        self._resolved_projection_fbanks: torch.Tensor | None = None
+
+    def _resolve_module_window(self, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        key = (_device_key(device), str(dtype))
+        if self._resolved_window_cache_key != key or self._resolved_window is None:
+            self._resolved_window = _resolve_window(
+                None,
+                win_length=self.win_length,
+                device=device,
+                dtype=dtype,
+                window_fn=self.window_fn,
+            )
+            self._resolved_window_cache_key = key
+        return self._resolved_window
+
+    def _resolve_module_projection_fbanks(self, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        f_max = float(self.sample_rate) / 2.0 if self.f_max is None else self.f_max
+        key = (_device_key(device), str(dtype), f_max)
+        if self._resolved_projection_fbanks_cache_key != key or self._resolved_projection_fbanks is None:
+            fbanks = melscale_fbanks(
+                n_freqs=(self.n_fft // 2) + 1,
+                f_min=self.f_min,
+                f_max=f_max,
+                n_mels=self.n_mels,
+                sample_rate=self.sample_rate,
+                norm=self.norm,
+                mel_scale=self.mel_scale,
+                device=device,
+                dtype=dtype,
+            )
+            self._resolved_projection_fbanks = fbanks.t().contiguous()
+            self._resolved_projection_fbanks_cache_key = key
+        return self._resolved_projection_fbanks
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        _validate_waveform(x)
+        dtype = torch.float32 if x.dtype in (torch.float16, torch.bfloat16) else x.dtype
+        window = self._resolve_module_window(device=x.device, dtype=dtype)
+        projection_fbanks = self._resolve_module_projection_fbanks(device=x.device, dtype=dtype)
         return mel_spectrogram(
             x,
             sample_rate=self.sample_rate,
             n_fft=self.n_fft,
             hop_length=self.hop_length,
             win_length=self.win_length,
+            window=window,
             center=self.center,
             pad_mode=self.pad_mode,
             power=self.power,
@@ -368,6 +425,7 @@ class MelSpectrogramTransform(torch.nn.Module):
             top_db=self.top_db,
             window_fn=self.window_fn,
             use_mps_kernels=self.use_mps_kernels,
+            _projection_fbanks=projection_fbanks,
         )
 
 
