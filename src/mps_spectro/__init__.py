@@ -16,7 +16,7 @@ from mps_spectro.mel import (
 from mps_spectro.stft import mps_stft_forward as stft
 from mps_spectro.istft import mps_istft_forward as istft
 
-__version__ = "0.2.2"
+__version__ = "0.3.0"
 __all__ = [
     "stft",
     "istft",

@@ -55,6 +55,13 @@ frontend = DynamicMelSpectrogramTransform(
 mel = frontend(x, keyshift=3, speed=1.2)
 ```
 
+This `0.3.0` line expands `mps-spectro` from fast STFT/iSTFT plus fixed mel frontends into a broader shared spectral frontend package:
+
+- standard mel frontends for log, linear, dB, and compat-style outputs
+- dynamic frontends for pitch models with per-call `keyshift` / `speed`
+- optional external mel filterbank injection for exact project parity
+- parity-oriented dynamic STFT mode when exact legacy wrapper behavior matters more than the lowest-level fast path
+
 Drop-in compatible with [python-audio-separator](https://github.com/karaokenerds/python-audio-separator) (MDX, Roformer, Demucs) — **1.4x faster STFT** and **2x faster iSTFT** on stereo 44.1 kHz audio with no model changes. See [benchmarks](#stftistft-in-audio-separator-workloads) below.
 
 ## Install
@@ -67,10 +74,27 @@ pip install mps-spectro
 
 - PyTorch-compatible STFT/ISTFT semantics (same parameters as `torch.stft` / `torch.istft`)
 - PyTorch-native mel frontends built on top of the same spectral core
+- Dynamic mel/spectrogram frontends for pitch models with `keyshift`, `speed`, and optional external mel bases
 - Fused overlap-add with optimized Metal compute shaders
 - Autograd support with custom Metal backward kernels
 - `torch.compile` compatible (`aot_eager` backend) via `torch.library` custom ops
 - Pure Python — no C++ build step, no Xcode CLI tools
+
+## Validated downstream use cases
+
+The current package surface has been benchmarked and parity-checked in several real consumer projects:
+
+- `mamba_amt`: log-mel frontend replacement on MPS
+- `python-audio-separator`: shared STFT/iSTFT compatibility layer
+- `LinkSeg`: compat mel frontend replacing project-local frontend code
+- `SongFormer-mps`: shared dB mel frontends for MusicFM and MuQ
+- `RVMPE`: dynamic mel frontend with per-call `keyshift` / `speed`
+- `torchfcpe`: dynamic spectrogram path for the MPS mel frontend patch
+
+The most important takeaway is that `mps-spectro` now covers both:
+
+- fixed frontend replacements for torchaudio-style mel paths
+- dynamic frontend building blocks for pitch models that previously needed project-local MPS STFT patches
 
 ### Autograd
 
@@ -197,6 +221,22 @@ On the `mamba_amt` log-mel frontend configuration (`16 kHz`, `n_fft=2048`, `hop=
 - speedup: `2.44x`
 - max abs diff: `1.14e-4`
 - mean abs diff: `6.33e-6`
+
+### Dynamic frontends in `RVMPE` and `torchfcpe`
+
+The new dynamic frontend APIs were validated against the prior project-local MPS paths:
+
+- `RVMPE` dynamic mel frontend:
+  - old median: `1.436 ms`
+  - new shared path: `1.182 ms`
+  - speedup: `1.21x`
+  - parity: max abs `4.77e-07`, mean abs `1.90e-08`
+
+- `torchfcpe` dynamic spectrogram path:
+  - old median: `3.347 ms`
+  - new shared path: `3.249 ms`
+  - speedup: `1.03x`
+  - parity on realistic mel-style positive filterbanks stayed effectively exact, with max abs `3.58e-07` and mean abs `1.79e-08` after log compression
 
 ## Using MLX instead of PyTorch?
 
