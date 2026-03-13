@@ -4,7 +4,7 @@ import pytest
 import torch
 import torchaudio
 
-from mps_spectro import LogMelSpectrogramTransform, MelSpectrogramTransform, mel_spectrogram
+from mps_spectro import LogMelSpectrogramTransform, MelSpectrogramTransform, amplitude_to_db, mel_spectrogram
 
 
 def _mamba_amt_reference(device: torch.device) -> tuple[torch.nn.Module, LogMelSpectrogramTransform]:
@@ -75,3 +75,41 @@ def test_log_output_modes() -> None:
 
     torch.testing.assert_close(_apply_log_output(mel, log_amin=1e-5, log_mode="clamp"), expected_clamp)
     torch.testing.assert_close(_apply_log_output(mel, log_amin=1e-5, log_mode="add"), expected_add)
+
+
+@pytest.mark.parametrize("device_name", ["cpu", pytest.param("mps", marks=pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS required"))])
+def test_db_output_matches_torchaudio(device_name: str) -> None:
+    device = torch.device(device_name)
+    wav = torch.randn(2, 24000 * 2, device=device, dtype=torch.float32)
+    ours = MelSpectrogramTransform(
+        sample_rate=24000,
+        n_fft=2048,
+        hop_length=240,
+        n_mels=128,
+        power=2.0,
+        pad_mode="reflect",
+        output_scale="db",
+    ).to(device)
+    ref_mel = torchaudio.transforms.MelSpectrogram(
+        sample_rate=24000,
+        n_fft=2048,
+        hop_length=240,
+        n_mels=128,
+    ).to(device)
+    ref_db = torchaudio.transforms.AmplitudeToDB().to(device)
+
+    expected = ref_db(ref_mel(wav))
+    actual = ours(wav)
+
+    assert actual.shape == expected.shape
+    max_abs = float((actual - expected).abs().max().item())
+    mean_abs = float((actual - expected).abs().mean().item())
+    assert max_abs <= 5.0e-4
+    assert mean_abs <= 5.0e-5
+
+
+def test_amplitude_to_db_matches_torchaudio() -> None:
+    x = torch.rand(2, 128, 100, dtype=torch.float32) * 1e4
+    expected = torchaudio.transforms.AmplitudeToDB()(x)
+    actual = amplitude_to_db(x, stype="power", top_db=80.0)
+    torch.testing.assert_close(actual, expected)

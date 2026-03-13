@@ -128,13 +128,13 @@ def amplitude_to_db(
     amin: float = 1e-10,
 ) -> torch.Tensor:
     multiplier = 10.0 if stype == "power" else 20.0
-    amin_t = torch.tensor(float(amin), device=x.device, dtype=x.dtype)
     x_db = multiplier * torch.log10(torch.clamp(x, min=float(amin)))
     if top_db is not None:
-        flat = x_db.reshape(x_db.shape[0], -1) if x_db.dim() >= 2 else x_db.reshape(1, -1)
-        ref = flat.max(dim=1).values
-        while ref.dim() < x_db.dim():
-            ref = ref.unsqueeze(-1)
+        if x_db.dim() >= 2:
+            ref = torch.amax(x_db, dim=-1, keepdim=True)
+            ref = torch.amax(ref, dim=-2, keepdim=True)
+        else:
+            ref = torch.amax(x_db, dim=0, keepdim=True)
         x_db = torch.maximum(x_db, ref - float(top_db))
     return x_db
 
@@ -289,7 +289,8 @@ def mel_spectrogram(
         device=device,
         dtype=dtype,
     )
-    mel = torch.matmul(fbanks.unsqueeze(0), magnitude)
+    # Project in [B, T, F] layout to avoid slower broadcasted [1, M, F] matmul on MPS.
+    mel = torch.matmul(magnitude.transpose(-2, -1), fbanks.t()).transpose(-2, -1)
     if output_scale == "linear":
         out = mel
     elif output_scale == "log":
