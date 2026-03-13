@@ -37,6 +37,24 @@ frontend = LogMelSpectrogramTransform(
 mel = frontend(x)
 ```
 
+Dynamic pitch/model frontends with per-call `keyshift` / `speed`, including support for externally supplied mel filterbanks:
+
+```python
+from mps_spectro import DynamicMelSpectrogramTransform
+
+frontend = DynamicMelSpectrogramTransform(
+    sample_rate=16000,
+    n_fft=1024,
+    hop_length=160,
+    win_length=1024,
+    output_scale="log",
+    log_amin=1e-5,
+    mel_basis=external_mel_basis,  # optional [n_mels, n_freqs]
+)
+
+mel = frontend(x, keyshift=3, speed=1.2)
+```
+
 Drop-in compatible with [python-audio-separator](https://github.com/karaokenerds/python-audio-separator) (MDX, Roformer, Demucs) — **1.4x faster STFT** and **2x faster iSTFT** on stereo 44.1 kHz audio with no model changes. See [benchmarks](#stftistft-in-audio-separator-workloads) below.
 
 ## Install

@@ -4,9 +4,12 @@ import mps_spectro._torch_ops as _torch_ops  # noqa: F401 — register custom op
 
 from mps_spectro.mel import (
     CompatMelSpectrogramTransform,
+    DynamicMelSpectrogramTransform,
     LogMelSpectrogramTransform,
     MelSpectrogramTransform,
     amplitude_to_db,
+    dynamic_mel_spectrogram,
+    dynamic_spectrogram,
     mel_spectrogram,
     melscale_fbanks,
 )
@@ -18,8 +21,11 @@ __all__ = [
     "stft",
     "istft",
     "CompatMelSpectrogramTransform",
+    "DynamicMelSpectrogramTransform",
     "MelSpectrogramTransform",
     "LogMelSpectrogramTransform",
+    "dynamic_spectrogram",
+    "dynamic_mel_spectrogram",
     "mel_spectrogram",
     "melscale_fbanks",
     "amplitude_to_db",

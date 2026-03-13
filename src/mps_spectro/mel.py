@@ -254,6 +254,113 @@ def _spectral_power(spec: torch.Tensor, power: float) -> torch.Tensor:
     raise RuntimeError(f"Unsupported STFT output shape: {tuple(spec.shape)}")
 
 
+def _dynamic_stft_params(
+    *,
+    n_fft: int,
+    win_length: int,
+    hop_length: int,
+    keyshift: float,
+    speed: float,
+) -> tuple[int, int, int]:
+    factor = 2 ** (float(keyshift) / 12.0)
+    n_fft_new = max(1, int(round(int(n_fft) * factor)))
+    win_length_new = max(1, int(round(int(win_length) * factor)))
+    hop_length_new = max(1, int(round(int(hop_length) * float(speed))))
+    return n_fft_new, win_length_new, hop_length_new
+
+
+def _match_target_n_freqs(
+    magnitude: torch.Tensor,
+    *,
+    target_n_freqs: int,
+    reference_win_length: int,
+    dynamic_win_length: int,
+) -> torch.Tensor:
+    target_n_freqs = int(target_n_freqs)
+    resize = int(magnitude.size(-2))
+    if resize < target_n_freqs:
+        magnitude = F.pad(magnitude, (0, 0, 0, target_n_freqs - resize))
+    magnitude = magnitude[:, :target_n_freqs, :]
+    if int(dynamic_win_length) != int(reference_win_length):
+        magnitude = magnitude * (float(reference_win_length) / float(dynamic_win_length))
+    return magnitude
+
+
+def dynamic_spectrogram(
+    x: torch.Tensor,
+    *,
+    n_fft: int,
+    hop_length: int,
+    win_length: int | None = None,
+    window: Optional[torch.Tensor] = None,
+    center: bool = True,
+    pad_mode: Literal["constant", "reflect"] = "constant",
+    power: float = 1.0,
+    normalized: bool = False,
+    keyshift: float = 0.0,
+    speed: float = 1.0,
+    target_n_freqs: int | None = None,
+    magnitude_eps: float = 0.0,
+    window_fn: Callable[..., torch.Tensor] = torch.hann_window,
+    use_mps_kernels: bool = True,
+) -> torch.Tensor:
+    x, orig_1d = _validate_waveform(x)
+    device = x.device
+    dtype = torch.float32 if x.dtype in (torch.float16, torch.bfloat16) else x.dtype
+    x = x.to(dtype=dtype)
+    n_fft = int(n_fft)
+    win_length = int(win_length or n_fft)
+    n_fft_dynamic, win_length_dynamic, hop_length_dynamic = _dynamic_stft_params(
+        n_fft=n_fft,
+        win_length=win_length,
+        hop_length=hop_length,
+        keyshift=keyshift,
+        speed=speed,
+    )
+    window_t = _resolve_window(
+        window,
+        win_length=win_length_dynamic,
+        device=device,
+        dtype=dtype,
+        window_fn=window_fn,
+    )
+    spec = _stft_for_mel(
+        x,
+        n_fft=n_fft_dynamic,
+        hop_length=hop_length_dynamic,
+        win_length=win_length_dynamic,
+        window=window_t,
+        center=center,
+        pad_mode=pad_mode,
+        use_mps_kernels=use_mps_kernels,
+    )
+    if float(magnitude_eps) != 0.0 and float(power) == 1.0:
+        if spec.is_complex():
+            magnitude = torch.sqrt(spec.real.square() + spec.imag.square() + float(magnitude_eps))
+        elif spec.ndim >= 4 and spec.shape[-1] == 2:
+            real = spec[..., 0]
+            imag = spec[..., 1]
+            magnitude = torch.sqrt(real.square() + imag.square() + float(magnitude_eps))
+        else:
+            raise RuntimeError(f"Unsupported STFT output shape: {tuple(spec.shape)}")
+    else:
+        magnitude = _spectral_power(spec, float(power))
+        if float(magnitude_eps) != 0.0:
+            magnitude = magnitude + float(magnitude_eps)
+    if normalized:
+        magnitude = magnitude * ((1.0 / math.sqrt(n_fft_dynamic)) ** float(power))
+    if target_n_freqs is not None:
+        magnitude = _match_target_n_freqs(
+            magnitude,
+            target_n_freqs=target_n_freqs,
+            reference_win_length=win_length,
+            dynamic_win_length=win_length_dynamic,
+        )
+    if orig_1d:
+        return magnitude.squeeze(0)
+    return magnitude
+
+
 def mel_spectrogram(
     x: torch.Tensor,
     *,
@@ -341,6 +448,92 @@ def mel_spectrogram(
         stype = "magnitude" if float(power) == 1.0 else "power"
         out = amplitude_to_db(mel, stype=stype, top_db=top_db)
 
+    if orig_1d:
+        return out.squeeze(0)
+    return out
+
+
+def dynamic_mel_spectrogram(
+    x: torch.Tensor,
+    *,
+    sample_rate: int,
+    n_fft: int,
+    hop_length: int,
+    win_length: int | None = None,
+    center: bool = True,
+    pad_mode: Literal["constant", "reflect"] = "constant",
+    power: float = 1.0,
+    normalized: bool = False,
+    n_mels: int = 128,
+    f_min: float = 0.0,
+    f_max: float | None = None,
+    norm: MelNorm = None,
+    mel_scale: MelScale = "htk",
+    output_scale: MelOutputScale = "linear",
+    log_amin: float = 1e-5,
+    log_mode: LogMelMode = "clamp",
+    top_db: float | None = 80.0,
+    keyshift: float = 0.0,
+    speed: float = 1.0,
+    mel_basis: torch.Tensor | None = None,
+    magnitude_eps: float = 0.0,
+    window_fn: Callable[..., torch.Tensor] = torch.hann_window,
+    use_mps_kernels: bool = True,
+) -> torch.Tensor:
+    x, orig_1d = _validate_waveform(x)
+    device = x.device
+    dtype = torch.float32 if x.dtype in (torch.float16, torch.bfloat16) else x.dtype
+    x = x.to(dtype=dtype)
+    n_fft = int(n_fft)
+    win_length = int(win_length or n_fft)
+    if f_max is None:
+        f_max = float(sample_rate) / 2.0
+
+    if mel_basis is not None:
+        if mel_basis.dim() != 2:
+            raise ValueError(f"mel_basis must be 2D [n_mels, n_freqs], got {tuple(mel_basis.shape)}")
+        mel_basis_t = mel_basis.to(device=device, dtype=dtype).contiguous()
+        target_n_freqs = int(mel_basis_t.shape[1])
+        projection_fbanks = mel_basis_t.t().contiguous()
+    else:
+        target_n_freqs = (n_fft // 2) + 1
+        fbanks = melscale_fbanks(
+            n_freqs=target_n_freqs,
+            f_min=f_min,
+            f_max=f_max,
+            n_mels=n_mels,
+            sample_rate=sample_rate,
+            norm=norm,
+            mel_scale=mel_scale,
+            device=device,
+            dtype=dtype,
+        )
+        projection_fbanks = fbanks.t()
+
+    magnitude = dynamic_spectrogram(
+        x,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        win_length=win_length,
+        center=center,
+        pad_mode=pad_mode,
+        power=power,
+        normalized=normalized,
+        keyshift=keyshift,
+        speed=speed,
+        target_n_freqs=target_n_freqs,
+        magnitude_eps=magnitude_eps,
+        window_fn=window_fn,
+        use_mps_kernels=use_mps_kernels,
+    )
+    mel = torch.matmul(magnitude.transpose(-2, -1), projection_fbanks).transpose(-2, -1)
+    if output_scale == "linear":
+        out = mel
+    elif output_scale == "log":
+        out = _apply_log_output(mel, log_amin=log_amin, log_mode=log_mode)
+    else:
+        stype = "magnitude" if float(power) == 1.0 else "power"
+        out = amplitude_to_db(mel, stype=stype, top_db=top_db)
     if orig_1d:
         return out.squeeze(0)
     return out
@@ -582,11 +775,90 @@ class CompatMelSpectrogramTransform(MelSpectrogramTransform):
         )
 
 
+class DynamicMelSpectrogramTransform(MelSpectrogramTransform):
+    def __init__(
+        self,
+        *,
+        sample_rate: int,
+        n_fft: int,
+        hop_length: int,
+        win_length: int | None = None,
+        n_mels: int = 128,
+        f_min: float = 0.0,
+        f_max: float | None = None,
+        center: bool = True,
+        pad_mode: Literal["constant", "reflect"] = "constant",
+        power: float = 1.0,
+        norm: MelNorm = None,
+        mel_scale: MelScale = "htk",
+        output_scale: MelOutputScale = "linear",
+        log_amin: float = 1e-5,
+        log_mode: LogMelMode = "clamp",
+        top_db: float | None = 80.0,
+        mel_basis: torch.Tensor | None = None,
+        window_fn: Callable[..., torch.Tensor] = torch.hann_window,
+        use_mps_kernels: bool = True,
+    ) -> None:
+        super().__init__(
+            sample_rate=sample_rate,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=win_length,
+            n_mels=n_mels,
+            f_min=f_min,
+            f_max=f_max,
+            center=center,
+            pad_mode=pad_mode,
+            power=power,
+            norm=norm,
+            mel_scale=mel_scale,
+            output_scale=output_scale,
+            log_amin=log_amin,
+            log_mode=log_mode,
+            top_db=top_db,
+            window_fn=window_fn,
+            use_mps_kernels=use_mps_kernels,
+        )
+        self._external_mel_basis = mel_basis
+
+    def forward(self, x: torch.Tensor, *, keyshift: float = 0.0, speed: float = 1.0, center: bool | None = None) -> torch.Tensor:
+        center_value = self.center if center is None else bool(center)
+        return dynamic_mel_spectrogram(
+            x,
+            sample_rate=self.sample_rate,
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            win_length=self.win_length,
+            center=center_value,
+            pad_mode=self.pad_mode,
+            power=self.power,
+            normalized=False,
+            n_mels=self.n_mels,
+            f_min=self.f_min,
+            f_max=self.f_max,
+            norm=self.norm,
+            mel_scale=self.mel_scale,
+            output_scale=self.output_scale,
+            log_amin=self.log_amin,
+            log_mode=self.log_mode,
+            top_db=self.top_db,
+            keyshift=keyshift,
+            speed=speed,
+            mel_basis=self._external_mel_basis,
+            magnitude_eps=0.0,
+            window_fn=self.window_fn,
+            use_mps_kernels=self.use_mps_kernels,
+        )
+
+
 __all__ = [
     "MelSpectrogramTransform",
     "LogMelSpectrogramTransform",
     "CompatMelSpectrogramTransform",
+    "DynamicMelSpectrogramTransform",
     "mel_spectrogram",
+    "dynamic_spectrogram",
+    "dynamic_mel_spectrogram",
     "melscale_fbanks",
     "amplitude_to_db",
 ]
