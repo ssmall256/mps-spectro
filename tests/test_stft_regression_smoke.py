@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from mps_spectro.stft import mps_stft_forward
+from mps_spectro.stft import _should_use_metal_stft, mps_stft_forward
 
 
 def _assert_mps() -> None:
@@ -122,3 +122,8 @@ def test_mps_stft_preserves_1d_shape() -> None:
     wav = torch.randn(hop * 16, device=device, dtype=torch.float32)
     out = mps_stft_forward(wav, n_fft=n_fft, hop_length=hop)
     assert out.dim() == 2
+
+
+def test_stft_dispatch_threshold_prefers_batched_medium_workloads() -> None:
+    assert _should_use_metal_stft(batch_size=1, output_bytes=4 * 1024 * 1024) is False
+    assert _should_use_metal_stft(batch_size=4, output_bytes=4 * 1024 * 1024) is True

@@ -6,6 +6,18 @@ import torch
 from mps_spectro import compiler
 
 
+def _should_use_metal_stft(
+    *,
+    batch_size: int,
+    output_bytes: int,
+) -> bool:
+    # Small single-item workloads still favor torch.stft on MPS, but medium
+    # batched workloads cross over much earlier than the old global 5 MB rule.
+    if batch_size >= 4:
+        return output_bytes >= 4 * 1024 * 1024
+    return output_bytes >= 5 * 1024 * 1024
+
+
 def _validate_input(x: torch.Tensor) -> tuple[torch.Tensor, bool]:
     orig_1d = (x.dim() == 1)
     if orig_1d:
@@ -89,15 +101,13 @@ def mps_stft_forward(
     padded_length = input_length + 2 * pad_amount
     n_frames = (padded_length - n_fft) // hop_length + 1
 
-    # Use Metal kernel when the output tensor is large enough to be
-    # bandwidth-bound, where the tiled shared-memory kernel amortises the
-    # Python 3-op dispatch overhead.  For smaller workloads torch.stft's
-    # single fused C++ call is faster.  Empirical crossover is ~5 MB on
-    # Apple Silicon (M-series).
-    _METAL_THRESHOLD_BYTES = 5 * 1024 * 1024  # 5 MB
+    # Use the custom Metal path once the workload is large enough to amortize
+    # the Python-side dispatch and extra FFT plumbing. Single-item workloads
+    # still favor torch.stft until the output gets fairly large, but medium
+    # batched jobs cross over much earlier.
     output_bytes = batch_size * n_frames * n_fft * 4  # float32
 
-    if output_bytes < _METAL_THRESHOLD_BYTES:
+    if not _should_use_metal_stft(batch_size=batch_size, output_bytes=output_bytes):
         out = torch.stft(
             x,
             n_fft=n_fft,
